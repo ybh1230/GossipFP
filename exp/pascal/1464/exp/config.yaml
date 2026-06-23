@@ -82,17 +82,10 @@ gossip:
   confusion_momentum: 0.95
   topk: 3
   temperature: 0.2
-  similarity_weight: 1.0
   confusion_weight: 0.5
   min_pixels: 8
-  margin: 0.2
-  loss_weight: 0.05
+  loss_weight: 0.0
   diffusion_rounds: 2
-  self_loop: 0.55
-  min_reliability: 0.2
-  reliability_warmup: 64.0
-  epsilon_min_ratio: 0.35
-  risk_gamma: 1.0
   perturbation_mode: residual
   
 

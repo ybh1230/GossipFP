@@ -40,7 +40,7 @@
   <rect x="520" y="250" width="160" height="95" class="box" />
   <text x="600" y="285" text-anchor="middle" class="text">Losses</text>
   <text x="600" y="313" text-anchor="middle" class="small">supervised, pseudo</text>
-  <text x="600" y="333" text-anchor="middle" class="small">gossip separation</text>
+  <text x="600" y="333" text-anchor="middle" class="small">gossip consistency</text>
 
   <path d="M195 95 H255" class="arrow" />
   <path d="M425 95 H495" class="arrow" />

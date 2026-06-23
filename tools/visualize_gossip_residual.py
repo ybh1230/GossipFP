@@ -64,7 +64,7 @@ def color_from_value(value):
     return r, g, b
 
 
-def draw_heatmap(names, norms, risks, output_path, topk):
+def draw_heatmap(names, norms, scaled_norms, output_path, topk):
     width = 1160
     row_h = 34
     margin_l = 190
@@ -76,7 +76,6 @@ def draw_heatmap(names, norms, risks, output_path, topk):
 
     max_norm = max(float(norms.max()), 1e-6)
     norm_values = (norms / max_norm).clamp(0, 1).tolist()
-    risk_values = risks.clamp(0, 1).tolist()
 
     image = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(image)
@@ -94,7 +93,7 @@ def draw_heatmap(names, norms, risks, output_path, topk):
         name = names[idx]
         norm = float(norms[idx])
         norm_v = norm_values[idx]
-        risk = float(risks[idx]) if idx < len(risks) else 0.0
+        scaled_norm = float(scaled_norms[idx]) if idx < len(scaled_norms) else 0.0
         fill = color_from_value(norm_v)
         bar_len = int(bar_w * norm_v)
 
@@ -102,7 +101,7 @@ def draw_heatmap(names, norms, risks, output_path, topk):
         draw.text((24, y + 9), f"{idx:02d} {name}", fill=label_color, font=font)
         draw.rectangle((margin_l, y + 6, margin_l + bar_w, y + row_h - 7), outline=(226, 232, 240), fill=(248, 250, 252))
         draw.rectangle((margin_l, y + 6, margin_l + bar_len, y + row_h - 7), fill=fill)
-        draw.text((margin_l + bar_w + 12, y + 9), f"{norm:.3f} / risk {risk:.3f}", fill=(31, 41, 55), font=font)
+        draw.text((margin_l + bar_w + 12, y + 9), f"{norm:.3f} / scaled {scaled_norm:.3f}", fill=(31, 41, 55), font=font)
 
     image.save(output_path)
 
@@ -112,7 +111,12 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     state = unwrap_gossip_state(checkpoint)
     disagreement = tensor_from_state(state, "last_disagreement")
-    risks = tensor_from_state(state, "last_risk") if "last_risk" in state else torch.zeros(disagreement.shape[0])
+    if "last_residual_norm" in state:
+        scaled_norms = tensor_from_state(state, "last_residual_norm")
+    elif "last_risk" in state:
+        scaled_norms = tensor_from_state(state, "last_risk")
+    else:
+        scaled_norms = torch.zeros(disagreement.shape[0])
     norms = disagreement.norm(dim=1)
 
     names = PASCAL_CLASSES if args.dataset == "pascal" else CITY_CLASSES
@@ -126,11 +130,11 @@ def main():
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["class_id", "class_name", "residual_norm", "risk"])
+        writer.writerow(["class_id", "class_name", "residual_norm", "scaled_residual_norm"])
         for idx, name in enumerate(names):
-            writer.writerow([idx, name, float(norms[idx]), float(risks[idx])])
+            writer.writerow([idx, name, float(norms[idx]), float(scaled_norms[idx])])
 
-    draw_heatmap(names, norms, risks, output, args.topk)
+    draw_heatmap(names, norms, scaled_norms, output, args.topk)
     print(f"Saved residual heatmap to {output}")
     print(f"Saved residual values to {csv_path}")
 

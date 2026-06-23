@@ -18,167 +18,144 @@
 \maketitle
 
 \begin{abstract}
-Semi-supervised semantic segmentation relies on unlabeled images to regularize dense classifiers, yet pseudo labels are often biased near semantic boundaries and underrepresented categories. Existing feature perturbation methods explore uncertain regions by estimating the feature density, but online density estimation introduces an auxiliary generative model and the resulting perturbation is not explicitly tied to the classes that are currently confused. This paper proposes Gossip-Guided Feature Perturbation (GossipFP), a reliability-aware class gossip framework for semi-supervised semantic segmentation. Instead of treating gossip as a full-parameter optimizer or merely mining negative prototypes, GossipFP treats each semantic category as a graph node that maintains an online prototype and reliability score. Row-normalized prototype similarity and teacher confusion define a dynamic class communication graph. Multi-round lazy gossip diffusion produces a consensus state, and the residual between the original prototype and this consensus state forms a semantic graph-disagreement field. Unlabeled features are perturbed along reliable high-risk disagreement fields with an adaptive radius, and the student is trained to preserve the original pseudo label. GossipFP removes the density estimator, produces class-conditional boundary perturbations, and provides a unified mechanism for reliability estimation, normalized graph exchange, gossip disagreement, perturbation, and regularization.
+Semi-supervised semantic segmentation depends on pseudo labels, but pseudo labels are often biased near semantic boundaries and confusing classes. Density-descending feature perturbation explores low-density regions, yet it requires an auxiliary online density estimator and the resulting direction is not explicitly tied to the classes that the teacher currently confuses. We propose Gossip-Guided Feature Perturbation (GossipFP), a class-level information exchange mechanism for semantic boundary exploration. GossipFP maintains one prototype per class, builds a normalized relation graph from prototype similarity and teacher confusion, and performs a few lazy gossip diffusion rounds. The key object is not the diffused consensus itself, but the residual between a class prototype and its gossip consensus. This residual gives a compact semantic boundary direction for adversarial feature perturbation. The final method intentionally uses a fixed perturbation radius and removes reliability scores, adaptive radii, and mandatory auxiliary separation losses, making the contribution easier to analyze and ablate.
 \end{abstract}
 
 \section{Introduction}
 
-Semi-supervised semantic segmentation aims to learn dense visual representations from a small labeled set and a large unlabeled set. Teacher-student consistency methods have become a strong paradigm: the teacher predicts pseudo labels on weakly augmented images, and the student is trained on strongly augmented images. However, the quality of pseudo labels is uneven. High-confidence regions can be overrepresented, while boundary pixels, rare classes, and visually similar categories remain underexplored.
+Semi-supervised semantic segmentation aims to learn dense visual representations from a small labeled set and a large unlabeled set. A common solution is teacher-student consistency: an exponential moving average teacher predicts pseudo labels, and the student is trained to keep those labels under strong augmentation \cite{tarvainen2017mean}. This works well on confident regions, but the teacher can repeatedly underexplore pixels near semantic boundaries, rare classes, and visually similar categories.
 
-Feature-level perturbation provides a direct way to regularize the classifier around its decision boundary. Density-descending feature perturbation (DDFP) estimates the feature density with a normalizing flow and perturbs confident features toward lower-density regions \cite{wang2024ddfp}. This is motivated by the low-density separation assumption, but it raises two practical issues. First, the density estimator is a second trainable model that must be optimized online with dense features. Second, a low-density direction is not necessarily the semantic direction that matters most for a particular pixel. For example, the useful perturbation for a road pixel is often toward sidewalk, car, or building boundaries, not an arbitrary sparse region in feature space.
+Feature-level perturbation is a direct way to probe these weak regions. DDFP perturbs features toward lower-density regions estimated by a normalizing flow \cite{wang2024ddfp}. The density view is meaningful under the low-density separation assumption, but it has two limitations for dense prediction. First, the normalizing flow is a second trainable model optimized online on high-dimensional features. Second, a low-density direction is class-agnostic: it may move a road feature into a sparse feature region without specifically testing the road-sidewalk, road-car, or road-building boundary.
 
-It is important to distinguish our goal from graph regularization and contrastive learning. Graph regularization propagates or smooths labels/features over a graph so that neighboring nodes become similar \cite{kipf2017gcn}. Contrastive learning selects positives and negatives so that representations are pulled together or pushed apart \cite{he2020moco,li2021pcl}. GossipFP uses a graph, but neither smoothness nor representation separation is the primary objective. We first let class nodes reach a local gossip consensus, and then use the disagreement residual between a class prototype and its consensus state as a semantic perturbation field. In other words, graph methods use consensus as the output, contrastive methods use neighbors as training pairs, while GossipFP uses the failure to reach class agreement as the direction for boundary exploration.
+We replace density estimation with class-level gossip. The term ``gossip'' is used carefully. Graph regularization and graph neural networks propagate features or labels so neighboring nodes become smoother \cite{kipf2017gcn}. Contrastive learning selects positives and negatives so representations are pulled together or pushed apart \cite{he2020moco,li2021pcl}. GossipFP has a different target. It lets semantic class nodes exchange prototype information, but it does not use the consensus as a smoothed prediction and does not use neighbors merely as contrastive negatives. Instead, it uses the residual between the original class prototype and the local gossip consensus as the perturbation direction. Thus graph regularization asks for agreement, contrastive learning asks for separation, and GossipFP asks: \emph{where does a class disagree with its confusing semantic neighborhood, and can the student remain stable there?}
 
-We ask whether gossip strategy can replace density estimation in a way that is necessary rather than cosmetic. Parameter-level gossip, as used in optimization literature, exchanges historical model parameters to escape local optima. Directly applying that idea to semantic segmentation is unattractive: it is expensive, hard to analyze at pixel level, and weakly related to pseudo-label bias. Our key observation is that gossip should operate at the semantic class level. Each class can be viewed as an information node. The node maintains what the teacher currently believes the class looks like, listens to nearby and confusing classes, and produces a boundary-aware direction for perturbing features.
-
-We propose GossipFP. A class prototype bank is updated online from labeled pixels and confident unlabeled pseudo labels. For each class, GossipFP estimates a reliability score, builds row-normalized relations from prototype similarity and teacher confusion, and performs multi-round lazy gossip diffusion over reliable class nodes. The diffused state itself is a smoothed consensus; our perturbation uses the disagreement residual between the consensus and the original class prototype. This residual acts as a semantic counterfactual boundary field: it indicates where the class boundary is likely to be weak while suppressing unreliable early teacher errors. The perturbed features are supervised with the original pseudo labels, forcing the student classifier to remain stable under class-aware boundary exploration. Finally, a clean-feature gossip separation loss keeps features closer to their own class node than to the gossiped boundary state.
+This residual view is the reason multi-round gossip is useful beyond a single weighted prototype average. A one-hop average describes only immediate nearest classes. Lazy diffusion repeatedly mixes local neighborhoods, so the residual captures a higher-order class boundary field induced by the current relation graph. We use only a few rounds to avoid oversmoothing. The method remains small: no learned graph module, no class-dependent reliability formula, no adaptive perturbation radius, and no mandatory margin loss.
 
 Our contributions are:
 \begin{itemize}
-    \item We reformulate gossip strategy for semi-supervised segmentation as reliability-aware graph diffusion over semantic class nodes, avoiding costly full-parameter gossip.
-    \item We propose a normalized prototype-confusion relation graph that distinguishes GossipFP from simple adaptive negative mining.
-    \item We introduce graph-disagreement feature perturbation with adaptive radius, plus a clean-feature separation loss using the same residual boundary fields.
-    \item We provide an implementation that removes the normalizing-flow density estimator and can be trained on PASCAL VOC and Cityscapes with standard distributed training.
+    \item We reformulate feature perturbation for semi-supervised segmentation as class-level gossip residual exploration, replacing an online density estimator with a lightweight semantic memory.
+    \item We build a normalized prototype-confusion graph that uses both semantic proximity and the teacher's current confusion, while avoiding unnormalized score addition.
+    \item We introduce residual-guided perturbation and include a direct ``residual vs. consensus state'' ablation to show that the residual, not graph smoothing alone, is the useful signal.
+    \item We provide runnable PASCAL VOC and Cityscapes training code, ablation configs, and a residual visualization tool for class-wise boundary analysis.
 \end{itemize}
 
 \section{Related Work}
 
 \paragraph{Semi-supervised semantic segmentation.}
-Teacher-student training and consistency regularization are widely used for semi-supervised dense prediction. A teacher model produces pseudo labels, and a student model learns from strong perturbations while ignoring unreliable pixels. The main limitation is that pseudo labels can reinforce the teacher's current bias, especially around ambiguous boundaries.
+Teacher-student training is widely used for semi-supervised dense prediction. The teacher provides pseudo labels, while the student learns from augmented inputs. The main risk is confirmation bias: wrong or incomplete pseudo labels can become self-reinforcing, especially around ambiguous boundaries.
 
 \paragraph{Feature perturbation.}
-Adversarial and feature-level perturbations regularize a classifier by probing local neighborhoods of the representation. DDFP perturbs features toward lower-density regions estimated by a normalizing flow \cite{wang2024ddfp}. GossipFP follows the same goal of decision-boundary exploration, but replaces density estimation with semantic information exchange among class prototypes.
+Adversarial and feature-level perturbations regularize a classifier by probing local neighborhoods of the representation. DDFP perturbs features toward low-density regions estimated by a normalizing flow \cite{wang2024ddfp,dinh2017realnvp}. GossipFP keeps the same broad goal of boundary exploration, but makes the perturbation class-conditional through prototype information exchange.
 
 \paragraph{Gossip strategy.}
-Gossip protocols spread information through local exchanges without requiring a central coordinator \cite{kempe2003gossip}. In optimization, gossip can combine parameters from different nodes or histories. For dense prediction, we argue that parameter-level gossip is not the right granularity. GossipFP instead uses each class as a node and exchanges prototype-level semantic information.
+Gossip protocols exchange information through local communication without a central coordinator \cite{kempe2003gossip}. Optimization methods often apply gossip to parameters. For semantic segmentation, we argue that class prototypes are the right granularity: they are cheap to store, interpretable, and directly aligned with dense semantic errors.
 
 \section{Method}
 
 \subsection{Training Framework}
 
-Let $\mathcal{D}_l=\{(x_i,y_i)\}$ be labeled images and $\mathcal{D}_u=\{u_i\}$ be unlabeled images. We use a student network $S$ and an exponential moving average teacher $T$. The teacher predicts pseudo labels $\hat{y}$ on weakly augmented unlabeled images. Pixels with confidence below threshold $\gamma$ are ignored. The student is trained on labeled images, strongly augmented unlabeled images, and gossip-perturbed features.
+Let $\mathcal{D}_l=\{(x_i,y_i)\}$ be labeled images and $\mathcal{D}_u=\{u_i\}$ be unlabeled images. A student network $S$ is trained with a teacher $T$ updated by exponential moving average. The teacher predicts pseudo labels $\hat{Y}$ on weakly augmented unlabeled images, and pixels below confidence threshold $\gamma$ are ignored. GossipFP modifies the perturbation branch: instead of using a density gradient, it perturbs decoder features along class-level gossip residuals.
 
-\subsection{Reliability-Aware Class Gossip Memory}
+\subsection{Prototype and Confusion Memory}
 
-GossipFP maintains a prototype $p_c \in \mathbb{R}^d$ for every class $c$. Given teacher features $f_i$ and labels $\tilde{y}_i$ from labeled or confident pseudo-labeled pixels, the batch prototype for class $c$ is
+GossipFP maintains a normalized prototype $p_c \in \mathbb{R}^d$ for each class $c$. Given teacher features $f_i$ and labels $\tilde{y}_i$ from ground-truth or confident pseudo-labeled pixels, the batch prototype is
 \begin{equation}
-    \bar{p}_c = \frac{1}{|\Omega_c|}\sum_{i \in \Omega_c} \frac{f_i}{\|f_i\|_2},
+    \bar{p}_c =
+    \mathrm{norm}
+    \left(
+    \frac{1}{|\Omega_c|}
+    \sum_{i \in \Omega_c}
+    \mathrm{norm}(f_i)
+    \right),
     \quad
-    \Omega_c = \{i \mid \tilde{y}_i=c\}.
+    \Omega_c=\{i \mid \tilde{y}_i=c\}.
 \end{equation}
-The memory is updated with momentum, but a class observed for the first time is initialized directly rather than slowly warmed from zero:
+If class $c$ has enough pixels in the distributed mini-batch, its memory is updated by
 \begin{equation}
-    p_c \leftarrow
-    \mathrm{norm}\left(m p_c + (1-m)\bar{p}_c\right),
+    p_c \leftarrow \mathrm{norm}\left(m p_c + (1-m)\bar{p}_c\right).
 \end{equation}
-where $m$ is the prototype momentum. Classes with too few pixels in the current distributed mini-batch are not updated.
+A class observed for the first time is initialized directly by $\bar{p}_c$.
 
-To reduce the cold-start problem, each class node also maintains a reliability value. Ground-truth pixels use confidence $1$, while pseudo-labeled pixels use the teacher confidence. Let $\kappa_c$ be the moving average confidence of class $c$ and $n_c$ be its effective pixel count. We define
+The teacher also provides a confusion statistic. For pixels assigned to class $c$, we average the teacher probability of class $j$:
 \begin{equation}
-    \rho_c = \kappa_c \left(1-\exp(-n_c/\eta)\right),
+    q_{c,j} =
+    \frac{\sum_{i \in \Omega_c} a_i P_T(j\mid x_i)}
+    {\sum_{i \in \Omega_c} a_i},
 \end{equation}
-where $\eta$ controls the warm-up speed. The product form approximates two requirements for a reliable class node: the assigned labels should be correct, captured by $\kappa_c$, and the node should have enough observations, captured by the coverage term $1-\exp(-n_c/\eta)$. The latter can be viewed as a Poisson-style probability that sufficient evidence has been observed. A class participates in gossip only when $\rho_c$ exceeds a threshold. This prevents early teacher mistakes from immediately driving semantic perturbations.
-
-The teacher also provides a class confusion matrix. For pixels labeled as class $c$, we average the teacher probability assigned to class $j$ with label confidence $a_i$ as weight:
-\begin{equation}
-    q_{c,j} = \frac{\sum_{i \in \Omega_c} a_i P_T(j \mid x_i)}
-    {\sum_{i \in \Omega_c} a_i}.
-\end{equation}
-For ground-truth pixels $a_i=1$; for pseudo-labeled pixels $a_i$ is the teacher confidence. The diagonal is set to zero, and the matrix is updated with momentum.
+where $a_i=1$ for ground-truth labels and $a_i$ is the teacher confidence for pseudo labels. Low-confidence pseudo labels are already ignored by the training threshold. The diagonal of $q$ is set to zero and the matrix is updated with momentum. A class joins the graph once it has a prototype and enough accumulated pixels. This simple readiness rule replaces the previous reliability-score design.
 
 \subsection{Normalized Gossip Relation Graph}
 
-Directly adding prototype similarity and teacher confusion is ill-conditioned because they have different scales. Let $\mathcal{V}=\{c\mid \rho_c\ge\rho_{\min}\}$ be the reliable node set. Valid neighbors for class $c$ are $\mathcal{V}\setminus\{c\}$, and invalid entries are masked. GossipFP first row-normalizes both relation matrices over valid neighbors:
+For class $c$, valid neighbors are observed non-self classes. Directly adding prototype similarity and teacher confusion is poorly conditioned because the two rows can have different scales. We therefore standardize each relation row over valid neighbors:
 \begin{equation}
-    \mathcal{Z}(M)_{c,j} =
+    \mathcal{Z}(M)_{c,j}
+    =
     \frac{M_{c,j}-\mu_c(M)}
-    {\sqrt{\sigma_c^2(M)+\epsilon_z}},
-    \quad j\in\mathcal{V}\setminus\{c\},
+    {\sqrt{\sigma_c^2(M)+\epsilon_z}}.
 \end{equation}
-where $\mu_c$ and $\sigma_c^2$ are the masked row mean and variance. For reliable class nodes, the edge score is
+The edge score is
 \begin{equation}
-    s_{c,j} =
-    \lambda_s \mathcal{Z}\left(\cos(p_c,p_j)\right)
-    + \lambda_q \mathcal{Z}\left(q_{c,j}\right),
-    \quad j \ne c.
+    s_{c,j}
+    =
+    (1-\lambda)\mathcal{Z}(\cos(p_c,p_j))_{c,j}
+    +
+    \lambda \mathcal{Z}(q)_{c,j},
+    \quad j \ne c,
 \end{equation}
-The top-$K$ classes form the outgoing neighborhood $\mathcal{N}_c$. Top-$K$ sparsification avoids noisy all-class averaging and keeps diffusion local; we evaluate sensitivity to $K$ in the ablation study. The row-stochastic adjacency is
+where $\lambda$ mixes semantic proximity and teacher confusion. Each node keeps its top-$K$ outgoing neighbors and normalizes them with a softmax temperature $\tau$:
 \begin{equation}
     A_{c,j} =
-    \frac{\exp(s_{c,j}/\tau)}{\sum_{k \in \mathcal{N}_c}\exp(s_{c,k}/\tau)}
-    \quad j \in \mathcal{N}_c,
+    \frac{\exp(s_{c,j}/\tau)}
+    {\sum_{k \in \mathcal{N}_c}\exp(s_{c,k}/\tau)},
+    \quad j\in\mathcal{N}_c.
 \end{equation}
-and zero otherwise. This step is not merely negative mining: it constructs a dynamic class communication graph whose edges are conditioned on both semantic proximity and current teacher failure modes.
+This graph is not a learned GNN layer. It is a compact class communication map that asks which semantic classes should exchange information before generating perturbations.
 
-\subsection{Lazy Gossip Diffusion}
+\subsection{Lazy Gossip Residual}
 
-Class information is exchanged through multi-round lazy diffusion rather than a single weighted interpolation. Initialize $h_c^{(0)}=p_c$. For $R$ rounds,
+Initialize $h_c^{(0)}=p_c$. GossipFP runs a small number of lazy diffusion rounds:
 \begin{equation}
     h_c^{(r+1)}
     =
     \mathrm{norm}
-    \left[
-    \alpha h_c^{(r)}
+    \left(
+    \frac{1}{2}h_c^{(r)}
     +
-    (1-\alpha)\sum_j A_{c,j}h_j^{(r)}
-    \right],
+    \frac{1}{2}\sum_j A_{c,j}h_j^{(r)}
+    \right),
+    \quad r=0,\ldots,R-1.
 \end{equation}
-where $\alpha$ is the self-loop coefficient. The diffused consensus state is $h_c=h_c^{(R)}$. This gives gossip its standard consensus interpretation: each reliable class node repeatedly averages information from local graph neighbors while retaining part of its own state.
+The fixed half self-loop removes an extra hyperparameter and prevents a class from being overwritten by its neighbors. Ignoring the final normalization for analysis, the update is $H^{(r+1)}=PH^{(r)}$ with $P=\frac{1}{2}I+\frac{1}{2}A$. Since $A$ is row-stochastic, $P$ is also row-stochastic and lazy. Repeated application moves connected components toward consensus, but GossipFP deliberately stops after a small $R$.
 
-For a fixed graph and ignoring the final $\ell_2$ normalization for clarity, the update is $H^{(r+1)}=PH^{(r)}$ with $P=\alpha I+(1-\alpha)A$. Since $A$ is row-stochastic and $\alpha\in(0,1)$, $P$ is also row-stochastic and lazy; repeated application converges to a local consensus component under the usual connectedness assumptions. GossipFP does not use the limiting consensus. A large $R$ would oversmooth class states and erase boundary information. We therefore use a small $R$ and interpret $P^R-I$ as a graph high-pass operator on class prototypes.
-
-The perturbation field is not the consensus state itself. We use the graph-disagreement residual
+The perturbation field is the residual
 \begin{equation}
-    b_c = h_c - p_c,
+    b_c = h_c^{(R)} - p_c.
 \end{equation}
-which is high when class $c$ strongly disagrees with the state obtained by local gossip. The class risk score is
-\begin{equation}
-    \omega_c = \frac{\|b_c\|_2}{2}\rho_c.
-\end{equation}
-Since $p_c$ and $h_c$ are normalized, $\|b_c\|_2/2 \in [0,1]$. The risk score controls how strongly class $c$ should be perturbed. This residual view is the key difference from ordinary graph diffusion: diffusion smooths class signals, while GossipFP uses the loss of agreement caused by diffusion as a boundary field.
+This residual is a graph high-pass signal: it is small when a prototype agrees with its local semantic neighborhood and large when the neighborhood pulls it toward a different state. Using $b_c$ rather than $h_c^{(R)}$ is central. The consensus state is a smoothed class representation; the residual is the boundary-seeking direction.
 
-\subsection{Gossip-Guided Perturbation}
+\subsection{Residual-Guided Perturbation}
 
-For a feature map $F$ and pseudo label map $\hat{Y}$, the decoder first computes intermediate features $z$. To create a perturbation, we maximize the tendency of features to move along the class disagreement residual:
+For a decoder feature $z_i$ with pseudo label $\hat{y}_i$, GossipFP maximizes alignment with the normalized class residual:
 \begin{equation}
-    \bar{b}_c = \frac{b_c}{\|b_c\|_2+\epsilon_b},
-    \quad
     \mathcal{L}_{adv}
     =
-    \frac{1}{\sum_{i\in\Omega}\omega_{\hat{y}_i}}
-    \sum_{i \in \Omega}
-    \omega_{\hat{y}_i}
+    \frac{1}{|\Omega|}
+    \sum_{i\in\Omega}
     \left\langle
-        \frac{z_i}{\|z_i\|_2+\epsilon_z},
-        \bar{b}_{\hat{y}_i}
+    \mathrm{norm}(z_i),
+    \mathrm{norm}(b_{\hat{y}_i})
     \right\rangle.
 \end{equation}
-The perturbation is generated by one normalized gradient step with adaptive radius:
+The perturbation is a single fixed-radius normalized gradient step:
 \begin{equation}
-    r_i = \epsilon_i
-    \frac{\nabla_r \mathcal{L}_{adv}(z(F+r), \hat{Y})}
-    {\|\nabla_r \mathcal{L}_{adv}(z(F+r), \hat{Y})\|_2},
-    \quad
-    \epsilon_i=\epsilon_{\min}+(\epsilon-\epsilon_{\min})\omega_{\hat{y}_i}^{\beta}.
+    r =
+    \epsilon
+    \frac{\nabla_r \mathcal{L}_{adv}(z(F+r),\hat{Y})}
+    {\|\nabla_r \mathcal{L}_{adv}(z(F+r),\hat{Y})\|_2+\epsilon_g}.
 \end{equation}
-This formulation directly uses the normalized residual direction. Due to feature normalization, the gradient with respect to the pre-normalized feature is the tangent-space projection of $\bar{b}_{\hat{y}_i}$, rather than an unqualified algebraic equality to $h_c-p_c$. The consensus-state ablation replaces $\bar{b}_c$ with the normalized consensus state $h_c$. The perturbed feature $F+r$ is then passed through the classifier and supervised by the original pseudo label. This is a semantic counterpart to density descent: instead of searching for a class-agnostic low-density direction, GossipFP searches for a reliable, currently confusing class boundary. The adaptive radius avoids large perturbations for low-reliability or low-risk classes.
+The gradient is the tangent-space projection induced by feature normalization, not an algebraic claim that the gradient is exactly $h_c-p_c$. This makes the direction statement technically precise. The residual branch is compared with a consensus-state ablation that replaces $\mathrm{norm}(b_c)$ by $\mathrm{norm}(h_c^{(R)})$ under the same graph and training schedule.
 
-\subsection{Gossip Separation Regularization}
-
-Clean features should remain closer to their own class node than to the gossiped neighbor. We use
-\begin{equation}
-    \mathcal{L}_{sep}
-    =
-    \frac{1}{\sum_{i\in\Omega}\omega_{\tilde{y}_i}}
-    \sum_{i \in \Omega}
-    \omega_{\tilde{y}_i}
-    \mathrm{softplus}\left(
-        \frac{\cos(z_i,g_{\tilde{y}_i})
-        -
-        \cos(z_i,p_{\tilde{y}_i}) + \delta}{\tau}
-    \right)\tau,
-\end{equation}
-where $\delta$ is a margin.
+The perturbed features are passed through the classifier and trained with the original pseudo labels. We use a fixed $\epsilon$ rather than an adaptive class radius. This keeps the method focused: the experiment tests the value of the gossip residual itself, not the interaction of residuals with extra uncertainty heuristics.
 
 \subsection{Overall Objective}
 
@@ -187,24 +164,24 @@ The training objective is
     \mathcal{L}
     =
     \mathcal{L}_{sup}
-    + \lambda_u \mathcal{L}_{u}
-    + \lambda_p \mathcal{L}_{u}^{gossip}
-    + \lambda_g \mathcal{L}_{sep}.
+    +
+    \lambda_u \mathcal{L}_{u}
+    +
+    \lambda_p \mathcal{L}_{u}^{gossip},
 \end{equation}
-Here $\mathcal{L}_{u}$ is the standard pseudo-label loss on strongly augmented images and $\mathcal{L}_{u}^{gossip}$ is the pseudo-label loss on gossip-perturbed features.
+where $\mathcal{L}_{sup}$ is the supervised segmentation loss, $\mathcal{L}_{u}$ is the standard pseudo-label loss on strongly augmented unlabeled images, and $\mathcal{L}_{u}^{gossip}$ is the pseudo-label loss on gossip-perturbed features.
 
 \begin{algorithm}[t]
 \caption{GossipFP Training}
 \begin{algorithmic}[1]
-\STATE Initialize student $S$, teacher $T$, and class gossip memory $\{p_c\}_{c=1}^C$.
+\STATE Initialize student $S$, teacher $T$, and class prototype memory.
 \FOR{each mini-batch}
-    \STATE Predict pseudo labels with teacher $T$.
-    \STATE Ignore low-confidence unlabeled pixels.
-    \STATE Update class prototypes, reliability, and teacher confusion in the gossip memory.
-    \STATE Build a row-normalized class relation graph and gate unreliable nodes.
-    \STATE Run lazy gossip diffusion for $R$ rounds.
-    \STATE Generate risk-aware gossip perturbation for unlabeled features.
-    \STATE Train $S$ with supervised, pseudo-label, perturbed pseudo-label, and separation losses.
+    \STATE Predict pseudo labels with teacher $T$ and ignore low-confidence pixels.
+    \STATE Update class prototypes and teacher confusion statistics.
+    \STATE Build a row-normalized prototype-confusion graph.
+    \STATE Run $R$ lazy gossip rounds and compute residuals $b_c=h_c-p_c$.
+    \STATE Generate fixed-radius residual-guided feature perturbations.
+    \STATE Train $S$ with supervised, pseudo-label, and gossip-perturbed pseudo-label losses.
     \STATE Update $T$ with EMA of $S$.
 \ENDFOR
 \end{algorithmic}
@@ -214,11 +191,9 @@ Here $\mathcal{L}_{u}$ is the standard pseudo-label loss on strongly augmented i
 
 \subsection{Datasets and Protocols}
 
-We evaluate on PASCAL VOC 2012 and Cityscapes under standard semi-supervised splits. For PASCAL VOC, we use the 732 and 1464 labeled-image splits. For Cityscapes, we use the 372 labeled-image split. Mean Intersection-over-Union (mIoU) is reported on the validation set. All methods use the same DeepLabV3+ backbone and teacher-student training schedule unless otherwise specified.
+We evaluate on PASCAL VOC 2012 and Cityscapes under standard semi-supervised splits. For PASCAL VOC, we use the 732 and 1464 labeled-image splits. For Cityscapes, we use the 372 labeled-image split. Mean Intersection-over-Union (mIoU) is reported on the validation set. All methods use the same DeepLabV3+ backbone \cite{chen2018deeplab} and teacher-student schedule unless otherwise specified.
 
 \subsection{Main Comparison}
-
-Table~\ref{tab:main} gives the expected reporting format. The final numbers should be filled after training on AutoDL.
 
 \begin{table}[t]
 \centering
@@ -239,7 +214,7 @@ GossipFP & -- & -- & -- \\
 
 \begin{table}[t]
 \centering
-\caption{Recommended ablations for validating the gossip design.}
+\caption{Ablations for validating the simplified gossip residual design.}
 \label{tab:ablation}
 \begin{tabular}{lc}
 \toprule
@@ -249,23 +224,20 @@ No gossip perturbation & -- \\
 Prototype similarity only & -- \\
 Teacher confusion only & -- \\
 Unnormalized score addition & -- \\
-One-hop exchange, no diffusion & -- \\
-$R=3$ diffusion rounds & -- \\
+One gossip round ($R=1$) & -- \\
 $K=1$ neighbors & -- \\
 $K=5$ neighbors & -- \\
-No reliability gate & -- \\
-Fixed perturbation radius & -- \\
 Consensus-state perturbation & -- \\
-Full GossipFP (residual) & -- \\
+Full GossipFP residual & -- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The decisive ablations are whether row-normalization, multi-round diffusion, reliability gating, and adaptive perturbation radius each contribute beyond prototype negative mining. The most important comparison is consensus-state perturbation versus residual-disagreement perturbation. If the residual variant outperforms the consensus variant under the same graph, the result directly supports our claim that the contribution is not graph diffusion itself, but using the graph-disagreement field for boundary exploration.
+The decisive comparison is consensus-state perturbation versus residual perturbation. Both variants use the same prototypes, graph, top-$K$ neighbors, and diffusion rounds. If the residual variant wins, the evidence supports our claim that the contribution is not graph smoothing alone, but using the graph-disagreement residual as a boundary exploration field. The one-round and top-$K$ ablations test whether multi-round local exchange adds value beyond simple nearest-prototype mining.
 
 \subsection{Residual Visualization}
 
-To make the residual field interpretable, we visualize the class-wise norm $\|b_c\|_2$ after training. Figure~\ref{fig:residual_heatmap} shows the expected visualization format: each row is a semantic class, and hotter/larger bars indicate stronger disagreement between the class prototype and its gossip consensus. High residual classes should correspond to ambiguous semantic boundaries, such as road/sidewalk, person/rider, car/bus on Cityscapes or chair/sofa/table and animal categories on PASCAL VOC.
+To make the residual field interpretable, we visualize the class-wise norm $\|b_c\|_2$ after training. Figure~\ref{fig:residual_heatmap} shows the expected visualization format: each row is a semantic class, and larger bars indicate stronger disagreement between the class prototype and its gossip consensus. High residual classes should correspond to ambiguous semantic boundaries, such as road/sidewalk, person/rider, car/bus on Cityscapes or chair/sofa/table and animal categories on PASCAL VOC.
 
 \begin{figure}[t]
 \centering
@@ -274,17 +246,17 @@ To make the residual field interpretable, we visualize the class-wise norm $\|b_
 }{
 \fbox{\parbox[c][0.35\linewidth][c]{0.9\linewidth}{\centering Run \texttt{tools/visualize\_gossip\_residual.py} after training to generate this residual heatmap.}}
 }
-\caption{Class-wise graph-disagreement residual visualization. The heatmap is generated from the saved GossipFP memory using $\|b_c\|_2=\|h_c-p_c\|_2$. High residual classes indicate class nodes whose local gossip consensus strongly disagrees with their own prototype, suggesting semantically risky boundaries.}
+\caption{Class-wise graph-disagreement residual visualization. The heatmap is generated from the saved GossipFP memory using $\|b_c\|_2=\|h_c-p_c\|_2$. High residual classes indicate semantic boundaries where a class prototype disagrees strongly with its gossip consensus.}
 \label{fig:residual_heatmap}
 \end{figure}
 
 \subsection{Efficiency}
 
-GossipFP removes the normalizing-flow model and its optimizer. The remaining memory update consists of class-wise feature accumulation, relation construction, and sparse gossip diffusion. Dense relation construction costs $O(C^2d)$ for $C$ classes and prototype dimension $d$, while top-$K$ diffusion costs $O(RCKd)$ for $R$ rounds. Since $C=21$ for PASCAL VOC and $C=19$ for Cityscapes, the overhead is negligible compared with the backbone forward pass. For datasets with hundreds of classes, dense relation construction may become noticeable; in that regime the same formulation can use approximate top-$K$ retrieval or update the relation graph less frequently. Thus the method is intended as a class-level memory mechanism whose cost scales with the number of semantic categories, not with the number of pixels.
+GossipFP removes the normalizing-flow density estimator and its optimizer. The remaining overhead consists of class-wise feature accumulation, relation construction, and sparse gossip diffusion. Dense relation construction costs $O(C^2d)$ for $C$ classes and prototype dimension $d$, while top-$K$ diffusion costs $O(RCKd)$. Since $C=21$ for PASCAL VOC and $C=19$ for Cityscapes, this overhead is negligible compared with the backbone forward pass. For datasets with hundreds of classes, the same formulation can update the graph less frequently or use approximate top-$K$ retrieval.
 
 \section{Conclusion}
 
-This paper proposed GossipFP, a class-level gossip strategy for semi-supervised semantic segmentation. By replacing density descent with prototype and confusion based information exchange, GossipFP produces semantic boundary perturbations without an auxiliary density estimator. The method provides a unified view of memory update, neighbor exchange, perturbation generation, and feature separation, and offers a more direct solution to pseudo-label boundary bias than class-agnostic density exploration.
+This paper proposed GossipFP, a simplified class-level gossip residual method for semi-supervised semantic segmentation. By replacing density descent with prototype-confusion information exchange, GossipFP produces semantic boundary perturbations without an auxiliary density estimator. The final design centers on one claim: multi-round class gossip is useful because its residual exposes confusing semantic boundaries, and this residual is a better perturbation target than the smoothed consensus state itself.
 
 \bibliographystyle{plain}
 \bibliography{references}

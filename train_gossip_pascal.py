@@ -30,10 +30,13 @@ from utils.loss_helper import (
 from utils.lr_helper import get_optimizer, get_scheduler
 from utils.utils import (
     AverageMeter,
+    get_rank,
+    get_world_size,
     init_log,
     intersectionAndUnion,
     load_state,
     set_random_seed,
+    synchronize,
 )
 
 from torch.cuda.amp import GradScaler, autocast
@@ -54,6 +57,24 @@ to_clean_status = partial(to_status, status='clean')
 to_adv_status = partial(to_status, status='adv')
 to_mix_status = partial(to_status, status='mix')
 to_warm_status = partial(to_status, status='warm_up')
+
+
+def is_distributed():
+    return dist.is_available() and dist.is_initialized()
+
+
+def reduce_mean(tensor):
+    tensor = tensor.clone().detach()
+    if is_distributed():
+        dist.all_reduce(tensor)
+        tensor /= get_world_size()
+    return tensor
+
+
+def set_sampler_epoch(loader, epoch):
+    sampler = getattr(loader, "sampler", None)
+    if hasattr(sampler, "set_epoch"):
+        sampler.set_epoch(epoch)
 
 
 def main():
@@ -114,17 +135,10 @@ def main():
         confusion_momentum=gossip_cfg.get("confusion_momentum", 0.95),
         topk=gossip_cfg.get("topk", 3),
         temperature=gossip_cfg.get("temperature", 0.2),
-        similarity_weight=gossip_cfg.get("similarity_weight", 1.0),
         confusion_weight=gossip_cfg.get("confusion_weight", 0.5),
         min_pixels=gossip_cfg.get("min_pixels", 16),
-        margin=gossip_cfg.get("margin", 0.2),
         ignore_label=cfg.get("ignore_label", 255),
         diffusion_rounds=gossip_cfg.get("diffusion_rounds", 2),
-        self_loop=gossip_cfg.get("self_loop", 0.55),
-        min_reliability=gossip_cfg.get("min_reliability", 0.35),
-        reliability_warmup=gossip_cfg.get("reliability_warmup", 256.0),
-        epsilon_min_ratio=gossip_cfg.get("epsilon_min_ratio", 0.35),
-        risk_gamma=gossip_cfg.get("risk_gamma", 1.0),
         perturbation_mode=gossip_cfg.get("perturbation_mode", "residual"),
     ).cuda()
 
@@ -147,20 +161,21 @@ def main():
 
     optimizer = get_optimizer(params_list, cfg_optim)
 
-    local_rank = int(os.environ["LOCAL_RANK"])
-    model = torch.nn.parallel.DistributedDataParallel(
-        model,
-        device_ids=[local_rank],
-        output_device=local_rank,
-        find_unused_parameters=False,
-    )
+    if is_distributed():
+        local_rank = int(os.environ["LOCAL_RANK"])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False,
+        )
 
-    model_teacher = torch.nn.parallel.DistributedDataParallel(
-        model_teacher,
-        device_ids=[local_rank],
-        output_device=local_rank,
-        find_unused_parameters=False,
-    )
+        model_teacher = torch.nn.parallel.DistributedDataParallel(
+            model_teacher,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False,
+        )
     
     for p in model_teacher.parameters():
         p.requires_grad = False
@@ -267,7 +282,7 @@ def train(
 ):
     ema_decay_origin = cfg["net"]["ema_decay"]
     gossip_start = cfg["trainer"].get("gossip_start_epoch", 1)
-    gossip_weight = cfg.get("gossip", {}).get("loss_weight", 0.05)
+    gossip_weight = cfg.get("gossip", {}).get("loss_weight", 0.0)
     model.train()
 
     if epoch >= gossip_start + 1:
@@ -277,23 +292,23 @@ def train(
 
     model_teacher.apply(to_clean_status)
 
-    loader_l.sampler.set_epoch(epoch)
-    loader_u.sampler.set_epoch(epoch)
+    set_sampler_epoch(loader_l, epoch)
+    set_sampler_epoch(loader_u, epoch)
     loader_l_iter = iter(loader_l)
     loader_u_iter = iter(loader_u)
     assert len(loader_l) == len(
         loader_u
     ), f"labeled data {len(loader_l)} unlabeled data {len(loader_u)}, imbalance!"
 
-    rank, world_size = dist.get_rank(), dist.get_world_size()
+    rank, world_size = get_rank(), get_world_size()
 
     sup_losses = AverageMeter(10)
     uns_losses = AverageMeter(10)
     gossip_losses = AverageMeter(10)
     active_class_meter = AverageMeter(10)
     seen_class_meter = AverageMeter(10)
-    reliable_class_meter = AverageMeter(10)
-    reliability_meter = AverageMeter(10)
+    ready_class_meter = AverageMeter(10)
+    residual_meter = AverageMeter(10)
     data_times = AverageMeter(10)
     batch_times = AverageMeter(10)
     learning_rates = AverageMeter(10)
@@ -317,7 +332,7 @@ def train(
         image_u_s = image_u_s.cuda()
         ignore_mask = ignore_mask.cuda()
         
-        dist.barrier()
+        synchronize()
 
         num_labeled = len(image_l)
         if epoch < cfg["trainer"]["sup_only_epoch"]:
@@ -344,8 +359,8 @@ def train(
             gossip_stats = {
                 "active_classes": 0,
                 "seen_classes": int(gossip_bank.seen.sum().item()),
-                "reliable_classes": int((gossip_bank.reliability >= gossip_bank.min_reliability).sum().item()),
-                "mean_reliability": 0.0,
+                "ready_classes": int(gossip_bank._ready_nodes().sum().item()),
+                "mean_residual": float(gossip_bank.last_residual_norm.mean().item()),
             }
 
         else:
@@ -431,8 +446,11 @@ def train(
                                 label_u_aug.clone(),
                                 ignore_mask_aug.clone())
 
-                    label_tri = torch.cat((label_l.clone(), label_u_aug.clone()), dim=0)
-                    gossip_loss = gossip_bank.separation_loss(out_tri_s["fts_train"], label_tri)
+                    if gossip_weight > 0:
+                        label_tri = torch.cat((label_l.clone(), label_u_aug.clone()), dim=0)
+                        gossip_loss = gossip_bank.separation_loss(out_tri_s["fts_train"], label_tri)
+                    else:
+                        gossip_loss = sup_loss * 0.0
 
                     loss = sup_loss + 0.5*unsup_loss + 0.5*unsup_loss_pt + gossip_weight*gossip_loss
 
@@ -456,7 +474,7 @@ def train(
                     loss = sup_loss + unsup_loss
         
 
-            dist.barrier()
+            synchronize()
             
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -486,25 +504,19 @@ def train(
 
 
         # gather all loss from different gpus
-        reduced_sup_loss = sup_loss.clone().detach()
-        dist.all_reduce(reduced_sup_loss)
-        reduced_sup_loss /= world_size
+        reduced_sup_loss = reduce_mean(sup_loss)
         sup_losses.update(reduced_sup_loss.item())
 
-        reduced_uns_loss = unsup_loss.clone().detach()
-        dist.all_reduce(reduced_uns_loss)
-        reduced_uns_loss /= world_size
+        reduced_uns_loss = reduce_mean(unsup_loss)
         uns_losses.update(reduced_uns_loss.item())
 
-        reduced_gossip_loss = gossip_loss.clone().detach()
-        dist.all_reduce(reduced_gossip_loss)
-        reduced_gossip_loss /= world_size
+        reduced_gossip_loss = reduce_mean(gossip_loss)
         gossip_losses.update(reduced_gossip_loss.item())
 
         active_class_meter.update(gossip_stats["active_classes"])
         seen_class_meter.update(gossip_stats["seen_classes"])
-        reliable_class_meter.update(gossip_stats.get("reliable_classes", 0))
-        reliability_meter.update(gossip_stats.get("mean_reliability", 0.0))
+        ready_class_meter.update(gossip_stats.get("ready_classes", 0))
+        residual_meter.update(gossip_stats.get("mean_residual", 0.0))
 
         batch_end = time.time()
         batch_times.update(batch_end - batch_start)
@@ -518,7 +530,8 @@ def train(
                 "Uns {uns_loss.val:.3f} ({uns_loss.avg:.3f})\t"
                 "Gossip {gossip_loss.val:.3f} ({gossip_loss.avg:.3f})\t"
                 "SeenCls {seen_cls.val:.0f}\t"
-                "ReliableCls {rel_cls.val:.0f}\t".format(
+                "ReadyCls {ready_cls.val:.0f}\t"
+                "Residual {residual.val:.3f}\t".format(
                     cfg["dataset"]["n_sup"],
                     i_iter,
                     cfg["trainer"]["epochs"] * len(loader_l),
@@ -527,7 +540,8 @@ def train(
                     uns_loss=uns_losses,
                     gossip_loss=gossip_losses,
                     seen_cls=seen_class_meter,
-                    rel_cls=reliable_class_meter,
+                    ready_cls=ready_class_meter,
+                    residual=residual_meter,
                 )
             )
             tb_logger.add_scalar("lr", learning_rates.val, i_iter)
@@ -536,8 +550,8 @@ def train(
             tb_logger.add_scalar("Gossip Loss", gossip_losses.val, i_iter)
             tb_logger.add_scalar("Gossip Active Classes", active_class_meter.val, i_iter)
             tb_logger.add_scalar("Gossip Seen Classes", seen_class_meter.val, i_iter)
-            tb_logger.add_scalar("Gossip Reliable Classes", reliable_class_meter.val, i_iter)
-            tb_logger.add_scalar("Gossip Mean Reliability", reliability_meter.val, i_iter)
+            tb_logger.add_scalar("Gossip Ready Classes", ready_class_meter.val, i_iter)
+            tb_logger.add_scalar("Gossip Mean Residual", residual_meter.val, i_iter)
 
 
 
@@ -549,13 +563,13 @@ def validate(
 ):
     model.eval()
     model.apply(to_clean_status)
-    data_loader.sampler.set_epoch(epoch)
+    set_sampler_epoch(data_loader, epoch)
 
     num_classes, ignore_label = (
         cfg["net"]["num_classes"],
         cfg["dataset"]["ignore_label"],
     )
-    rank, world_size = dist.get_rank(), dist.get_world_size()
+    rank, world_size = get_rank(), get_world_size()
 
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
@@ -585,9 +599,10 @@ def validate(
         reduced_union = torch.from_numpy(union).cuda()
         reduced_target = torch.from_numpy(target).cuda()
 
-        dist.all_reduce(reduced_intersection)
-        dist.all_reduce(reduced_union)
-        dist.all_reduce(reduced_target)
+        if is_distributed():
+            dist.all_reduce(reduced_intersection)
+            dist.all_reduce(reduced_union)
+            dist.all_reduce(reduced_target)
 
         intersection_meter.update(reduced_intersection.cpu().numpy())
         union_meter.update(reduced_union.cpu().numpy())

@@ -6,6 +6,7 @@ import random
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
@@ -13,6 +14,16 @@ from dataset.transform import *
 from copy import deepcopy
 
 from .base import BaseDataset
+
+
+def _distributed_enabled():
+    return dist.is_available() and dist.is_initialized()
+
+
+def _build_sampler(dataset, shuffle):
+    if _distributed_enabled():
+        return DistributedSampler(dataset, shuffle=shuffle)
+    return None
 
 
 class city_dset(BaseDataset):
@@ -92,14 +103,14 @@ def build_cityloader(split, all_cfg, seed=0):
     dset = city_dset(cfg["data_root"], cfg["data_list"], seed, n_sup)
 
     # build sampler
-    sample = DistributedSampler(dset)
+    sample = _build_sampler(dset, shuffle=(split != "val"))
 
     loader = DataLoader(
         dset,
         batch_size=batch_size,
         num_workers=workers,
         sampler=sample,
-        shuffle=False,
+        shuffle=(sample is None and split != "val"),
         pin_memory=False,
     )
     return loader
@@ -122,24 +133,24 @@ def build_city_semi_loader(all_cfg, seed=0):
     data_list_unsup = cfg["data_list"].replace("labeled.txt", "unlabeled.txt")
     dset_unsup = city_dset(cfg["data_root"], data_list_unsup, seed, n_sup, 'unsup', cfg['train_crop_size'])
 
-    sample_sup = DistributedSampler(dset)
+    sample_sup = _build_sampler(dset, shuffle=True)
     loader_sup = DataLoader(
         dset,
         batch_size=batch_size,
         num_workers=workers,
         sampler=sample_sup,
-        shuffle=False,
+        shuffle=(sample_sup is None),
         pin_memory=True,
         drop_last=True,
     )
 
-    sample_unsup = DistributedSampler(dset_unsup)
+    sample_unsup = _build_sampler(dset_unsup, shuffle=True)
     loader_unsup = DataLoader(
         dset_unsup,
         batch_size=batch_size,
         num_workers=workers,
         sampler=sample_unsup,
-        shuffle=False,
+        shuffle=(sample_unsup is None),
         pin_memory=True,
         drop_last=True,
     )

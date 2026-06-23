@@ -5,11 +5,11 @@ import torch.nn.functional as F
 
 
 class GossipPrototypeBank(nn.Module):
-    """Reliability-aware class gossip memory.
+    """Class-level gossip memory for residual feature perturbation.
 
-    Each semantic class is a node in a dynamic graph. Nodes update their own
-    prototypes, estimate teacher reliability, build normalized class-relation
-    edges, and exchange information through lazy gossip diffusion.
+    Each semantic class is a node. Nodes maintain online prototypes, build a
+    normalized relation graph from prototype similarity and teacher confusion,
+    and exchange information through a small number of lazy gossip rounds.
     """
 
     def __init__(
@@ -20,17 +20,10 @@ class GossipPrototypeBank(nn.Module):
         confusion_momentum=0.95,
         topk=3,
         temperature=0.2,
-        similarity_weight=1.0,
         confusion_weight=0.5,
         min_pixels=16,
-        margin=0.2,
         ignore_label=255,
         diffusion_rounds=2,
-        self_loop=0.55,
-        min_reliability=0.35,
-        reliability_warmup=256.0,
-        epsilon_min_ratio=0.35,
-        risk_gamma=1.0,
         perturbation_mode="residual",
     ):
         super().__init__()
@@ -40,17 +33,11 @@ class GossipPrototypeBank(nn.Module):
         self.confusion_momentum = float(confusion_momentum)
         self.topk = int(topk)
         self.temperature = float(temperature)
-        self.similarity_weight = float(similarity_weight)
         self.confusion_weight = float(confusion_weight)
         self.min_pixels = int(min_pixels)
-        self.margin = float(margin)
         self.ignore_label = int(ignore_label)
         self.diffusion_rounds = int(diffusion_rounds)
-        self.self_loop = float(self_loop)
-        self.min_reliability = float(min_reliability)
-        self.reliability_warmup = float(reliability_warmup)
-        self.epsilon_min_ratio = float(epsilon_min_ratio)
-        self.risk_gamma = float(risk_gamma)
+        self.separation_margin = 0.2
         self.perturbation_mode = str(perturbation_mode).lower()
         if self.perturbation_mode not in {"residual", "consensus"}:
             raise ValueError("perturbation_mode must be either 'residual' or 'consensus'")
@@ -58,20 +45,14 @@ class GossipPrototypeBank(nn.Module):
         self.register_buffer("prototypes", torch.zeros(self.num_classes, self.feat_dim))
         self.register_buffer("counts", torch.zeros(self.num_classes))
         self.register_buffer("seen", torch.zeros(self.num_classes, dtype=torch.bool))
-        self.register_buffer("confidence", torch.zeros(self.num_classes))
-        self.register_buffer("reliability", torch.zeros(self.num_classes))
         self.register_buffer("confusion", torch.zeros(self.num_classes, self.num_classes))
-        self.register_buffer("last_risk", torch.zeros(self.num_classes))
+        self.register_buffer("last_residual_norm", torch.zeros(self.num_classes))
         self.register_buffer("last_adjacency", torch.zeros(self.num_classes, self.num_classes))
         self.register_buffer("last_disagreement", torch.zeros(self.num_classes, self.feat_dim))
 
     @torch.no_grad()
     def update(self, features, labels, logits=None, ignore_mask=None, label_confidence=None):
-        """Update class nodes from teacher features and labels.
-
-        `label_confidence` can be supplied to distinguish ground-truth labels
-        from pseudo labels. Ground-truth pixels should use confidence 1.
-        """
+        """Update class prototypes and teacher confusion statistics."""
         features = features.detach().float()
         labels = self._resize_labels(labels, features.shape[-2:])
         labels = self._apply_ignore(labels, ignore_mask, features.shape[-2:])
@@ -84,24 +65,19 @@ class GossipPrototypeBank(nn.Module):
             dim=1,
         )
         flat_labels = labels.reshape(-1)
-        flat_confidence = label_confidence.reshape(-1)
         valid = self._valid_label_mask(flat_labels)
 
         sums = features.new_zeros(self.num_classes, features.shape[1])
         counts = features.new_zeros(self.num_classes)
-        confidence_sums = features.new_zeros(self.num_classes)
 
         if valid.any():
             valid_features = flat_features[valid]
             valid_labels = flat_labels[valid]
-            valid_confidence = flat_confidence[valid]
             sums.index_add_(0, valid_labels, valid_features)
             counts.index_add_(0, valid_labels, torch.ones_like(valid_labels, dtype=features.dtype))
-            confidence_sums.index_add_(0, valid_labels, valid_confidence.to(features.dtype))
 
         self._all_reduce_(sums)
         self._all_reduce_(counts)
-        self._all_reduce_(confidence_sums)
 
         active = counts >= self.min_pixels
         old_seen_active = self.seen[active].clone() if active.any() else None
@@ -117,81 +93,65 @@ class GossipPrototypeBank(nn.Module):
             self.prototypes[active] = torch.where(old_seen, mixed_proto, batch_proto)
             self.seen[active] = True
 
-            batch_confidence = confidence_sums[active] / counts[active].clamp_min(1.0)
-            mixed_confidence = (
-                self.momentum * self.confidence[active]
-                + (1.0 - self.momentum) * batch_confidence
-            )
-            self.confidence[active] = torch.where(old_seen_active, mixed_confidence, batch_confidence)
-
         self.counts.mul_(self.momentum)
         if active.any():
             mixed_counts = self.counts[active] + (1.0 - self.momentum) * counts[active]
             self.counts[active] = torch.where(old_seen_active, mixed_counts, counts[active])
-        coverage = 1.0 - torch.exp(-self.counts / max(self.reliability_warmup, 1.0))
-        self.reliability.copy_(torch.clamp(self.confidence * coverage, 0.0, 1.0))
 
         if logits is not None:
             self._update_confusion(logits.detach().float(), labels, label_confidence)
 
         self._refresh_graph_cache()
 
-        reliable = self._ready_nodes()
+        ready = self._ready_nodes()
         return {
             "active_classes": int(active.sum().item()),
             "seen_classes": int(self.seen.sum().item()),
-            "reliable_classes": int(reliable.sum().item()),
-            "mean_reliability": float(self.reliability[reliable].mean().item()) if reliable.any() else 0.0,
+            "ready_classes": int(ready.sum().item()),
+            "mean_residual": float(self.last_residual_norm[ready].mean().item()) if ready.any() else 0.0,
         }
 
     def attack_loss(self, features, labels, ignore_mask=None):
-        """Loss maximized to create gossip-guided adversarial perturbations."""
-        feat, target, peer, valid, risk = self._prepare_pairs(features, labels, ignore_mask)
+        """Loss maximized to create gossip-guided feature perturbations."""
+        feat, target, peer, valid = self._prepare_pairs(features, labels, ignore_mask)
         if not valid.any():
             return features.sum() * 0.0
 
         feat = feat[valid]
         target = target[valid]
-        risk = risk[valid]
         own = self.prototypes.detach()[target]
         peer = peer.detach()[target]
+
         if self.perturbation_mode == "consensus":
-            loss = (feat * peer).sum(1)
+            direction = F.normalize(peer, dim=1, eps=1e-6)
+            direction_valid = torch.ones(feat.shape[0], dtype=torch.bool, device=feat.device)
         else:
-            residual_direction = F.normalize(peer - own, dim=1, eps=1e-6)
-            loss = (feat * residual_direction).sum(1)
-        return (loss * risk).sum() / risk.sum().clamp_min(1e-6)
+            residual = peer - own
+            residual_norm = residual.norm(dim=1)
+            direction_valid = residual_norm > 1e-6
+            direction = residual / residual_norm.clamp_min(1e-6).unsqueeze(1)
+
+        if not direction_valid.any():
+            return features.sum() * 0.0
+
+        feat = feat[direction_valid]
+        direction = direction[direction_valid]
+        return (feat * direction).sum(1).mean()
 
     def separation_loss(self, features, labels, ignore_mask=None):
-        """Keep clean features closer to their own node than to gossiped peers."""
-        feat, target, peer, valid, risk = self._prepare_pairs(features, labels, ignore_mask)
+        """Optional auxiliary loss; disabled by default in the provided configs."""
+        feat, target, peer, valid = self._prepare_pairs(features, labels, ignore_mask)
         if not valid.any():
             return features.sum() * 0.0
 
         feat = feat[valid]
         target = target[valid]
-        risk = risk[valid]
         own = self.prototypes.detach()[target]
         peer = peer.detach()[target]
         own_sim = (feat * own).sum(1)
         peer_sim = (feat * peer).sum(1)
-        loss = F.softplus((peer_sim - own_sim + self.margin) / self.temperature) * self.temperature
-        return (loss * risk).sum() / risk.sum().clamp_min(1e-6)
-
-    @torch.no_grad()
-    def perturbation_scale(self, labels, size):
-        """Return a per-pixel epsilon scale in [epsilon_min_ratio, 1]."""
-        labels = self._resize_labels(labels, size)
-        flat_labels = labels.reshape(-1)
-        valid = self._valid_label_mask(flat_labels)
-        safe_labels = flat_labels.clamp(0, self.num_classes - 1)
-        class_risk = self.last_risk.to(labels.device)
-        risk = class_risk[safe_labels]
-        risk = torch.where(valid, risk, torch.zeros_like(risk))
-        risk = risk.clamp(0.0, 1.0).pow(max(self.risk_gamma, 1e-6))
-        scale = self.epsilon_min_ratio + (1.0 - self.epsilon_min_ratio) * risk
-        scale = torch.where(valid, scale, torch.zeros_like(scale))
-        return scale.view(labels.shape[0], 1, labels.shape[1], labels.shape[2])
+        loss = F.softplus((peer_sim - own_sim + self.separation_margin) / self.temperature)
+        return (loss * self.temperature).mean()
 
     @torch.no_grad()
     def _update_confusion(self, logits, labels, label_confidence):
@@ -205,18 +165,21 @@ class GossipPrototypeBank(nn.Module):
 
         confusion_sum = logits.new_zeros(self.num_classes, self.num_classes)
         confidence_sum = logits.new_zeros(self.num_classes)
+        count_sum = logits.new_zeros(self.num_classes)
         if valid.any():
             weighted_probs = flat_probs[valid] * flat_confidence[valid].unsqueeze(1)
             confusion_sum.index_add_(0, flat_labels[valid], weighted_probs)
             confidence_sum.index_add_(0, flat_labels[valid], flat_confidence[valid])
+            count_sum.index_add_(0, flat_labels[valid], torch.ones_like(flat_confidence[valid]))
 
         self._all_reduce_(confusion_sum)
         self._all_reduce_(confidence_sum)
+        self._all_reduce_(count_sum)
         batch_confusion = confusion_sum / confidence_sum.clamp_min(1.0).unsqueeze(1)
         diag = torch.arange(self.num_classes, device=batch_confusion.device)
         batch_confusion[diag, diag] = 0.0
 
-        active = confidence_sum >= self.min_pixels
+        active = (count_sum >= self.min_pixels) & (confidence_sum > 0)
         if active.any():
             self.confusion[active] = (
                 self.confusion_momentum * self.confusion[active]
@@ -235,29 +198,27 @@ class GossipPrototypeBank(nn.Module):
         target = labels.reshape(-1)
         valid = self._valid_label_mask(target)
 
-        peer, peer_valid, class_risk = self._gossip_peers(features_float.device)
+        peer, peer_valid = self._gossip_peers(features_float.device)
         safe_target = target.clamp(0, self.num_classes - 1)
         class_ready = self.seen.to(target.device)[safe_target] & peer_valid.to(target.device)[safe_target]
-        risk = class_risk.to(target.device)[safe_target]
-        valid = valid & class_ready & (risk > 0)
-        return feat, target, peer, valid, risk
+        valid = valid & class_ready
+        return feat, target, peer, valid
 
     @torch.no_grad()
     def _refresh_graph_cache(self):
-        peer, peer_valid, risk = self._gossip_peers(self.prototypes.device)
-        self.last_risk.copy_(torch.where(peer_valid, risk, torch.zeros_like(risk)))
+        self._gossip_peers(self.prototypes.device)
 
     @torch.no_grad()
     def _gossip_peers(self, device):
         peer = self.prototypes.new_zeros(self.prototypes.shape)
         peer_valid = torch.zeros(self.num_classes, dtype=torch.bool, device=device)
-        class_risk = torch.zeros(self.num_classes, device=device)
 
         ready = self._ready_nodes().to(device)
         if int(ready.sum().item()) < 2:
             self.last_adjacency.zero_()
             self.last_disagreement.zero_()
-            return peer, peer_valid, class_risk
+            self.last_residual_norm.zero_()
+            return peer, peer_valid
 
         proto = F.normalize(self.prototypes.float(), dim=1)
         scores, ready_pair = self._relation_scores(proto, ready)
@@ -278,32 +239,31 @@ class GossipPrototypeBank(nn.Module):
         rounds = max(1, self.diffusion_rounds)
         for _ in range(rounds):
             neighbor_state = torch.matmul(adjacency, state)
-            state = F.normalize(self.self_loop * state + (1.0 - self.self_loop) * neighbor_state, dim=1)
+            state = F.normalize(
+                0.5 * state + 0.5 * neighbor_state,
+                dim=1,
+            )
 
         disagreement = state - proto
-        disagreement_norm = disagreement.norm(dim=1).clamp(0.0, 2.0) / 2.0
-        self.last_disagreement.copy_(torch.where(valid.unsqueeze(1), disagreement, torch.zeros_like(disagreement)))
+        residual_norm = disagreement.norm(dim=1).clamp(0.0, 2.0) / 2.0
+        self.last_disagreement.copy_(
+            torch.where(valid.unsqueeze(1), disagreement, torch.zeros_like(disagreement))
+        )
+        self.last_residual_norm.copy_(torch.where(valid, residual_norm, torch.zeros_like(residual_norm)))
 
-        reliability = self.reliability.to(scores.device)
-        if self.perturbation_mode == "consensus":
-            risk = reliability
-        else:
-            risk = disagreement_norm * reliability
-        risk = torch.where(valid, risk, torch.zeros_like(risk))
         peer = torch.where(valid.unsqueeze(1), state, torch.zeros_like(state))
         peer_valid.copy_(valid)
-        class_risk.copy_(risk)
-        return peer.to(device), peer_valid, class_risk.to(device)
+        return peer.to(device), peer_valid
 
     def _relation_scores(self, proto, ready):
         ready_pair = ready.unsqueeze(0) & ready.unsqueeze(1)
         diag = torch.eye(self.num_classes, dtype=torch.bool, device=proto.device)
         ready_pair = ready_pair & ~diag
 
-        cosine = torch.matmul(proto, proto.t())
-        cosine = self._masked_row_zscore(cosine, ready_pair)
+        cosine = self._masked_row_zscore(torch.matmul(proto, proto.t()), ready_pair)
         confusion = self._masked_row_zscore(self.confusion.float().to(proto.device), ready_pair)
-        scores = self.similarity_weight * cosine + self.confusion_weight * confusion
+        confusion_weight = min(max(self.confusion_weight, 0.0), 1.0)
+        scores = (1.0 - confusion_weight) * cosine + confusion_weight * confusion
         scores = scores.masked_fill(~ready_pair, -1e4)
         return scores, ready_pair
 
@@ -317,7 +277,7 @@ class GossipPrototypeBank(nn.Module):
         return z.masked_fill(~valid, -1e4)
 
     def _ready_nodes(self):
-        return self.seen & (self.reliability >= self.min_reliability)
+        return self.seen & (self.counts >= self.min_pixels)
 
     def _prepare_confidence(self, label_confidence, logits, labels, size):
         if label_confidence is not None:

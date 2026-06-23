@@ -17,6 +17,13 @@ def setup_distributed(backend="nccl", port=None):
     """
     num_gpus = torch.cuda.device_count()
 
+    if "SLURM_JOB_ID" not in os.environ and (
+        "RANK" not in os.environ or "WORLD_SIZE" not in os.environ
+    ):
+        if num_gpus > 0:
+            torch.cuda.set_device(0)
+        return 0, 1
+
     if "SLURM_JOB_ID" in os.environ:
         rank = int(os.environ["SLURM_PROCID"])
         world_size = int(os.environ["SLURM_NTASKS"])
@@ -47,6 +54,9 @@ def setup_distributed(backend="nccl", port=None):
 
 
 def gather_together(data):
+    if not dist.is_available() or not dist.is_initialized():
+        return [data]
+
     world_size = dist.get_world_size()
     gather_data = [torch.zeros_like(data).cuda() for _ in range(world_size)]
     dist.all_gather(gather_data, data)

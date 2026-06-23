@@ -44,8 +44,7 @@ def attack(fts_clean, label, classifier, final, gossip_bank, cfg, epsilon):
     final_loss = gossip_bank.attack_loss(fts_final, label)
 
     grad = torch.autograd.grad(final_loss, noise, retain_graph=False, create_graph=False)[0]
-    scale = gossip_bank.perturbation_scale(label, fts_ori.shape[-2:]).to(grad.dtype)
-    noise = epsilon * scale * torch.nn.functional.normalize(grad.detach(), dim=1, p=2, eps=1e-6)
+    noise = epsilon * torch.nn.functional.normalize(grad.detach(), dim=1, p=2, eps=1e-6)
     
     classifier.apply(to_mix_status)
 

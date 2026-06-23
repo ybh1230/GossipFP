@@ -15,6 +15,9 @@ from skimage.measure import label, regionprops
 
 @torch.no_grad()
 def gather_together(data):
+    if not dist.is_available() or not dist.is_initialized():
+        return [data]
+
     dist.barrier()
 
     world_size = dist.get_world_size()
@@ -581,7 +584,7 @@ def intersectionAndUnion(output, target, K, ignore_index=255):
 
 
 def load_state(path, model, optimizer=None, key="state_dict"):
-    rank = dist.get_rank()
+    rank = get_rank()
 
     def map_func(storage, location):
         return storage.cuda()
@@ -638,7 +641,7 @@ def load_state(path, model, optimizer=None, key="state_dict"):
 
 
 def load_state_mixbn(path, model, optimizer=None, key="state_dict"):
-    rank = dist.get_rank()
+    rank = get_rank()
 
     def map_func(storage, location):
         return storage.cuda()
