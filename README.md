@@ -2,20 +2,21 @@
 
 GossipFP is a semi-supervised semantic segmentation project derived from the DDFP training framework, but the original density-estimation innovation is replaced by a class-level gossip strategy.
 
-The key idea is not to apply gossip as a generic optimizer. Full-parameter gossip is expensive for segmentation and weakly connected to pixel-level errors. GossipFP instead treats each semantic class as a gossip node. Each node maintains an online feature prototype, estimates its reliability, builds normalized edges to nearby or confusing classes, and performs multi-round lazy gossip diffusion before generating boundary-aware feature perturbations.
+The key idea is not to apply gossip as a generic optimizer. Full-parameter gossip is expensive for segmentation and weakly connected to pixel-level errors. GossipFP instead treats each semantic class as a gossip node. Each node maintains an online feature prototype, estimates its reliability, builds normalized edges to nearby or confusing classes, and performs multi-round lazy gossip diffusion. The perturbation is not driven by the smoothed state itself, but by the disagreement residual between the original prototype and the diffused consensus state.
 
 ![GossipFP framework](docs/gossipfp_framework.svg)
 
 ## Why GossipFP
 
-Density-descending perturbation needs an extra normalizing flow model to estimate high-dimensional feature density online. That makes training heavier and the perturbation direction can be statistically meaningful without being semantically targeted. In semi-supervised segmentation, the harder failure mode is usually pseudo-label bias near class boundaries and underrepresented classes. GossipFP addresses this with a reliability-aware class graph: row-normalized prototype similarity and teacher confusion define edges, unreliable classes are gated during cold start, class states diffuse through the graph, and feature perturbation strength is scaled by the resulting class risk.
+Density-descending perturbation needs an extra normalizing flow model to estimate high-dimensional feature density online. That makes training heavier and the perturbation direction can be statistically meaningful without being semantically targeted. In semi-supervised segmentation, the harder failure mode is usually pseudo-label bias near class boundaries and underrepresented classes. GossipFP addresses this with a reliability-aware class graph: row-normalized prototype similarity and teacher confusion define edges, unreliable classes are gated during cold start, class states diffuse through the graph, and feature perturbation strength is scaled by the graph-disagreement residual. This makes the method different from ordinary graph smoothing: smoothing produces consensus, while GossipFP uses the residual of consensus as a semantic boundary field.
 
 ## Method Modules
 
 - `model/gossip/memory.py`: reliability-aware class prototype gossip memory with distributed updates.
 - Row-normalized class graph construction from prototype similarity and teacher confusion.
 - Multi-round lazy gossip diffusion over semantic class nodes.
-- Risk-aware perturbation scaling to reduce over-trusting early teacher errors.
+- Graph-disagreement residuals as semantic boundary fields.
+- Risk-aware perturbation scaling from residual magnitude and node reliability.
 - `model/model/attack.py`: gossip-guided adversarial feature perturbation.
 - `model/model/decoder.py`: injects gossip perturbations in the DeepLabV3+ decoder.
 - `train_gossip_pascal.py` and `train_gossip_city.py`: update the gossip memory from teacher features and train the student with gossip consistency.
@@ -108,7 +109,7 @@ gossip:
 - Gossip perturbation only: `gossip.loss_weight: 0.0`.
 - Gossip perturbation plus separation: default config.
 - Neighbor source: prototype similarity only vs. prototype similarity plus teacher confusion.
-- Graph exchange: one-hop weighted neighbor vs. multi-round gossip diffusion.
+- Boundary field: one-hop neighbor target vs. diffusion disagreement residual.
 - Reliability gate: enabled vs. disabled.
 - Adaptive epsilon: fixed vs. risk-aware.
 - `topk`: 1, 3, 5.

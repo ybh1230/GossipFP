@@ -59,6 +59,7 @@ class GossipPrototypeBank(nn.Module):
         self.register_buffer("confusion", torch.zeros(self.num_classes, self.num_classes))
         self.register_buffer("last_risk", torch.zeros(self.num_classes))
         self.register_buffer("last_adjacency", torch.zeros(self.num_classes, self.num_classes))
+        self.register_buffer("last_disagreement", torch.zeros(self.num_classes, self.feat_dim))
 
     @torch.no_grad()
     def update(self, features, labels, logits=None, ignore_mask=None, label_confidence=None):
@@ -243,6 +244,7 @@ class GossipPrototypeBank(nn.Module):
         ready = self._ready_nodes().to(device)
         if int(ready.sum().item()) < 2:
             self.last_adjacency.zero_()
+            self.last_disagreement.zero_()
             return peer, peer_valid, class_risk
 
         proto = F.normalize(self.prototypes.float(), dim=1)
@@ -266,7 +268,11 @@ class GossipPrototypeBank(nn.Module):
             neighbor_state = torch.matmul(adjacency, state)
             state = F.normalize(self.self_loop * state + (1.0 - self.self_loop) * neighbor_state, dim=1)
 
-        risk = torch.sigmoid(vals[:, 0]) * self.reliability.to(scores.device)
+        disagreement = state - proto
+        disagreement_norm = disagreement.norm(dim=1).clamp(0.0, 2.0) / 2.0
+        self.last_disagreement.copy_(torch.where(valid.unsqueeze(1), disagreement, torch.zeros_like(disagreement)))
+
+        risk = disagreement_norm * self.reliability.to(scores.device)
         risk = torch.where(valid, risk, torch.zeros_like(risk))
         peer = torch.where(valid.unsqueeze(1), state, torch.zeros_like(state))
         peer_valid.copy_(valid)
