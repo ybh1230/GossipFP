@@ -114,10 +114,17 @@ def main():
         confusion_momentum=gossip_cfg.get("confusion_momentum", 0.95),
         topk=gossip_cfg.get("topk", 3),
         temperature=gossip_cfg.get("temperature", 0.2),
+        similarity_weight=gossip_cfg.get("similarity_weight", 1.0),
         confusion_weight=gossip_cfg.get("confusion_weight", 0.5),
         min_pixels=gossip_cfg.get("min_pixels", 16),
         margin=gossip_cfg.get("margin", 0.2),
         ignore_label=cfg.get("ignore_label", 255),
+        diffusion_rounds=gossip_cfg.get("diffusion_rounds", 2),
+        self_loop=gossip_cfg.get("self_loop", 0.55),
+        min_reliability=gossip_cfg.get("min_reliability", 0.35),
+        reliability_warmup=gossip_cfg.get("reliability_warmup", 256.0),
+        epsilon_min_ratio=gossip_cfg.get("epsilon_min_ratio", 0.35),
+        risk_gamma=gossip_cfg.get("risk_gamma", 1.0),
     ).cuda()
 
     train_loader_sup, train_loader_unsup, val_loader = get_loader(cfg, seed=seed)
@@ -284,6 +291,8 @@ def train(
     gossip_losses = AverageMeter(10)
     active_class_meter = AverageMeter(10)
     seen_class_meter = AverageMeter(10)
+    reliable_class_meter = AverageMeter(10)
+    reliability_meter = AverageMeter(10)
     data_times = AverageMeter(10)
     batch_times = AverageMeter(10)
     learning_rates = AverageMeter(10)
@@ -334,6 +343,8 @@ def train(
             gossip_stats = {
                 "active_classes": 0,
                 "seen_classes": int(gossip_bank.seen.sum().item()),
+                "reliable_classes": int((gossip_bank.reliability >= gossip_bank.min_reliability).sum().item()),
+                "mean_reliability": 0.0,
             }
 
         else:
@@ -368,7 +379,17 @@ def train(
                 label_u_t[ignore_mask == 255] = 255
 
                 label_bi_t = torch.cat((label_l.clone(), label_u_t.clone()), dim=0)
-                gossip_stats = gossip_bank.update(fts_bi_t, label_bi_t, logits=pred_bi_t)
+                conf_bi_t = torch.cat(
+                    (torch.ones_like(label_l, dtype=logits_u_t.dtype), logits_u_t.clone()),
+                    dim=0,
+                )
+                conf_bi_t[label_bi_t == cfg.get("ignore_label", 255)] = 0
+                gossip_stats = gossip_bank.update(
+                    fts_bi_t,
+                    label_bi_t,
+                    logits=pred_bi_t,
+                    label_confidence=conf_bi_t,
+                )
 
                 if random.uniform(0,1) < 0.5:
                     image_u_aug, label_u_aug, ignore_mask_aug = generate_unsup_data(
@@ -481,6 +502,8 @@ def train(
 
         active_class_meter.update(gossip_stats["active_classes"])
         seen_class_meter.update(gossip_stats["seen_classes"])
+        reliable_class_meter.update(gossip_stats.get("reliable_classes", 0))
+        reliability_meter.update(gossip_stats.get("mean_reliability", 0.0))
 
         batch_end = time.time()
         batch_times.update(batch_end - batch_start)
@@ -493,7 +516,8 @@ def train(
                 "Sup {sup_loss.val:.3f} ({sup_loss.avg:.3f})\t"
                 "Uns {uns_loss.val:.3f} ({uns_loss.avg:.3f})\t"
                 "Gossip {gossip_loss.val:.3f} ({gossip_loss.avg:.3f})\t"
-                "SeenCls {seen_cls.val:.0f}\t".format(
+                "SeenCls {seen_cls.val:.0f}\t"
+                "ReliableCls {rel_cls.val:.0f}\t".format(
                     cfg["dataset"]["n_sup"],
                     i_iter,
                     cfg["trainer"]["epochs"] * len(loader_l),
@@ -502,6 +526,7 @@ def train(
                     uns_loss=uns_losses,
                     gossip_loss=gossip_losses,
                     seen_cls=seen_class_meter,
+                    rel_cls=reliable_class_meter,
                 )
             )
             tb_logger.add_scalar("lr", learning_rates.val, i_iter)
@@ -510,6 +535,8 @@ def train(
             tb_logger.add_scalar("Gossip Loss", gossip_losses.val, i_iter)
             tb_logger.add_scalar("Gossip Active Classes", active_class_meter.val, i_iter)
             tb_logger.add_scalar("Gossip Seen Classes", seen_class_meter.val, i_iter)
+            tb_logger.add_scalar("Gossip Reliable Classes", reliable_class_meter.val, i_iter)
+            tb_logger.add_scalar("Gossip Mean Reliability", reliability_meter.val, i_iter)
 
 
 
