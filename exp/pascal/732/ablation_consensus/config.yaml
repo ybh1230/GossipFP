@@ -48,7 +48,7 @@ trainer: # Required.
   thresh: 0.95
 
 saver:
-  snapshot_dir: checkpoints
+  snapshot_dir: checkpoints_consensus
   pretrain: ''
   auto_resume: False
 
@@ -92,7 +92,7 @@ gossip:
   reliability_warmup: 64.0
   epsilon_min_ratio: 0.35
   risk_gamma: 1.0
-  perturbation_mode: residual
+  perturbation_mode: consensus
   
 
 adv:

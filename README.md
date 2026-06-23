@@ -98,10 +98,42 @@ gossip:
   diffusion_rounds: 2
   min_reliability: 0.2
   epsilon_min_ratio: 0.35
+  perturbation_mode: residual
   loss_weight: 0.05
 ```
 
-`topk` controls how many neighbor classes each class exchanges information with. `similarity_weight` and `confusion_weight` control the normalized class graph. `diffusion_rounds` turns one-hop neighbors into a real gossip diffusion process. `min_reliability` prevents cold-start teacher noise from driving perturbations. `epsilon_min_ratio` keeps the perturbation small when class risk is low. `loss_weight` controls the auxiliary clean-feature separation loss; the main gain should still come from gossip-guided perturbation consistency.
+`topk` controls how many neighbor classes each class exchanges information with. `similarity_weight` and `confusion_weight` control the normalized class graph. `diffusion_rounds` turns one-hop neighbors into a real gossip diffusion process. `min_reliability` prevents cold-start teacher noise from driving perturbations. `epsilon_min_ratio` keeps the perturbation small when class risk is low. `perturbation_mode` is the key ablation switch: `residual` uses the graph-disagreement field `h_c - p_c`, while `consensus` perturbs directly toward the diffused consensus state `h_c`. `loss_weight` controls the auxiliary clean-feature separation loss; the main gain should still come from gossip-guided perturbation consistency.
+
+## Residual vs Consensus Ablation
+
+Default training uses residual perturbation:
+
+```bash
+cd exp/pascal/732/exp
+bash train.sh 4 29500
+```
+
+The consensus-state ablation is ready to run:
+
+```bash
+cd exp/pascal/732/ablation_consensus
+bash train.sh 4 29501
+```
+
+Both configs share the same data split and training schedule; the intended comparison is only `gossip.perturbation_mode: residual` vs. `consensus`.
+
+## Residual Visualization
+
+After training, generate a class-wise residual heatmap:
+
+```bash
+python tools/visualize_gossip_residual.py \
+  --checkpoint exp/pascal/732/exp/checkpoints/ckpt_best.pth \
+  --dataset pascal \
+  --output paper/figures/pascal_residual_heatmap.png
+```
+
+The script also writes a CSV with each class's `||b_c||_2` and risk value. High residual classes indicate semantic boundaries where the class prototype disagrees strongly with its gossip consensus state.
 
 ## Suggested Ablations
 
@@ -109,7 +141,7 @@ gossip:
 - Gossip perturbation only: `gossip.loss_weight: 0.0`.
 - Gossip perturbation plus separation: default config.
 - Neighbor source: prototype similarity only vs. prototype similarity plus teacher confusion.
-- Boundary field: one-hop neighbor target vs. diffusion disagreement residual.
+- Boundary field: consensus-state perturbation vs. disagreement-residual perturbation.
 - Reliability gate: enabled vs. disabled.
 - Adaptive epsilon: fixed vs. risk-aware.
 - `topk`: 1, 3, 5.

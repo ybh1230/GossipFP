@@ -87,6 +87,7 @@ gossip:
   reliability_warmup: 64.0
   epsilon_min_ratio: 0.35
   risk_gamma: 1.0
+  perturbation_mode: residual
 
 adv:
   eps: 4.0

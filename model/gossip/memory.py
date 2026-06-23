@@ -31,6 +31,7 @@ class GossipPrototypeBank(nn.Module):
         reliability_warmup=256.0,
         epsilon_min_ratio=0.35,
         risk_gamma=1.0,
+        perturbation_mode="residual",
     ):
         super().__init__()
         self.num_classes = int(num_classes)
@@ -50,6 +51,9 @@ class GossipPrototypeBank(nn.Module):
         self.reliability_warmup = float(reliability_warmup)
         self.epsilon_min_ratio = float(epsilon_min_ratio)
         self.risk_gamma = float(risk_gamma)
+        self.perturbation_mode = str(perturbation_mode).lower()
+        if self.perturbation_mode not in {"residual", "consensus"}:
+            raise ValueError("perturbation_mode must be either 'residual' or 'consensus'")
 
         self.register_buffer("prototypes", torch.zeros(self.num_classes, self.feat_dim))
         self.register_buffer("counts", torch.zeros(self.num_classes))
@@ -151,7 +155,10 @@ class GossipPrototypeBank(nn.Module):
         risk = risk[valid]
         own = self.prototypes.detach()[target]
         peer = peer.detach()[target]
-        loss = (feat * peer).sum(1) - (feat * own).sum(1)
+        if self.perturbation_mode == "consensus":
+            loss = (feat * peer).sum(1)
+        else:
+            loss = (feat * peer).sum(1) - (feat * own).sum(1)
         return (loss * risk).sum() / risk.sum().clamp_min(1e-6)
 
     def separation_loss(self, features, labels, ignore_mask=None):
@@ -272,7 +279,11 @@ class GossipPrototypeBank(nn.Module):
         disagreement_norm = disagreement.norm(dim=1).clamp(0.0, 2.0) / 2.0
         self.last_disagreement.copy_(torch.where(valid.unsqueeze(1), disagreement, torch.zeros_like(disagreement)))
 
-        risk = disagreement_norm * self.reliability.to(scores.device)
+        reliability = self.reliability.to(scores.device)
+        if self.perturbation_mode == "consensus":
+            risk = reliability
+        else:
+            risk = disagreement_norm * reliability
         risk = torch.where(valid, risk, torch.zeros_like(risk))
         peer = torch.where(valid.unsqueeze(1), state, torch.zeros_like(state))
         peer_valid.copy_(valid)

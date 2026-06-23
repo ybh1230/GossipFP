@@ -27,6 +27,8 @@ Semi-supervised semantic segmentation aims to learn dense visual representations
 
 Feature-level perturbation provides a direct way to regularize the classifier around its decision boundary. Density-descending feature perturbation (DDFP) estimates the feature density with a normalizing flow and perturbs confident features toward lower-density regions \cite{wang2024ddfp}. This is motivated by the low-density separation assumption, but it raises two practical issues. First, the density estimator is a second trainable model that must be optimized online with dense features. Second, a low-density direction is not necessarily the semantic direction that matters most for a particular pixel. For example, the useful perturbation for a road pixel is often toward sidewalk, car, or building boundaries, not an arbitrary sparse region in feature space.
 
+It is important to distinguish our goal from graph regularization and contrastive learning. Graph regularization propagates or smooths labels/features over a graph so that neighboring nodes become similar \cite{kipf2017gcn}. Contrastive learning selects positives and negatives so that representations are pulled together or pushed apart \cite{he2020moco,li2021pcl}. GossipFP uses a graph, but neither smoothness nor representation separation is the primary objective. We first let class nodes reach a local gossip consensus, and then use the disagreement residual between a class prototype and its consensus state as a semantic perturbation field. In other words, graph methods use consensus as the output, contrastive methods use neighbors as training pairs, while GossipFP uses the failure to reach class agreement as the direction for boundary exploration.
+
 We ask whether gossip strategy can replace density estimation in a way that is necessary rather than cosmetic. Parameter-level gossip, as used in optimization literature, exchanges historical model parameters to escape local optima. Directly applying that idea to semantic segmentation is unattractive: it is expensive, hard to analyze at pixel level, and weakly related to pseudo-label bias. Our key observation is that gossip should operate at the semantic class level. Each class can be viewed as an information node. The node maintains what the teacher currently believes the class looks like, listens to nearby and confusing classes, and produces a boundary-aware direction for perturbing features.
 
 We propose GossipFP. A class prototype bank is updated online from labeled pixels and confident unlabeled pseudo labels. For each class, GossipFP estimates a reliability score, builds row-normalized relations from prototype similarity and teacher confusion, and performs multi-round lazy gossip diffusion over reliable class nodes. The diffused state itself is a smoothed consensus; our perturbation uses the disagreement residual between the consensus and the original class prototype. This residual acts as a semantic counterfactual boundary field: it indicates where the class boundary is likely to be weak while suppressing unreliable early teacher errors. The perturbed features are supervised with the original pseudo labels, forcing the student classifier to remain stable under class-aware boundary exploration. Finally, a clean-feature gossip separation loss keeps features closer to their own class node than to the gossiped boundary state.
@@ -239,12 +241,28 @@ Unnormalized score addition & -- \\
 One-hop exchange, no diffusion & -- \\
 No reliability gate & -- \\
 Fixed perturbation radius & -- \\
-Full GossipFP & -- \\
+Consensus-state perturbation & -- \\
+Full GossipFP (residual) & -- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The decisive ablations are whether row-normalization, multi-round diffusion, reliability gating, and adaptive perturbation radius each contribute beyond prototype negative mining. This is the main defense against the criticism that the method is only a renamed contrastive neighbor strategy.
+The decisive ablations are whether row-normalization, multi-round diffusion, reliability gating, and adaptive perturbation radius each contribute beyond prototype negative mining. The most important comparison is consensus-state perturbation versus residual-disagreement perturbation. If the residual variant outperforms the consensus variant under the same graph, the result directly supports our claim that the contribution is not graph diffusion itself, but using the graph-disagreement field for boundary exploration.
+
+\subsection{Residual Visualization}
+
+To make the residual field interpretable, we visualize the class-wise norm $\|b_c\|_2$ after training. Figure~\ref{fig:residual_heatmap} shows the expected visualization format: each row is a semantic class, and hotter/larger bars indicate stronger disagreement between the class prototype and its gossip consensus. High residual classes should correspond to ambiguous semantic boundaries, such as road/sidewalk, person/rider, car/bus on Cityscapes or chair/sofa/table and animal categories on PASCAL VOC.
+
+\begin{figure}[t]
+\centering
+\IfFileExists{figures/pascal_residual_heatmap.png}{
+\includegraphics[width=\linewidth]{figures/pascal_residual_heatmap.png}
+}{
+\fbox{\parbox[c][0.35\linewidth][c]{0.9\linewidth}{\centering Run \texttt{tools/visualize\_gossip\_residual.py} after training to generate this residual heatmap.}}
+}
+\caption{Class-wise graph-disagreement residual visualization. The heatmap is generated from the saved GossipFP memory using $\|b_c\|_2=\|h_c-p_c\|_2$. High residual classes indicate class nodes whose local gossip consensus strongly disagrees with their own prototype, suggesting semantically risky boundaries.}
+\label{fig:residual_heatmap}
+\end{figure}
 
 \subsection{Efficiency}
 

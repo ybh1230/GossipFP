@@ -31,6 +31,7 @@ GossipFP targets semantic boundary exploration under noisy pseudo labels. For a 
 ## Reviewer-risk fixes added after critique
 
 - **"Gossip is only packaging."** The method now includes an explicit row-stochastic class graph and repeated lazy diffusion; the perturbation is defined by the graph-disagreement residual rather than by a nearest-negative prototype.
+- **"Graph diffusion is common."** The key ablation is residual-disagreement perturbation vs. consensus-state perturbation under the same graph. The method claims the residual is useful, not that diffusion alone is novel.
 - **"Similarity and confusion cannot be directly added."** Both matrices are masked and row-standardized before fusion.
 - **"Teacher confusion is unreliable early."** Each class node has reliability from confidence and effective sample count; unreliable nodes are gated.
 - **"Fixed epsilon is unsafe."** Perturbation radius is scaled by class risk.
@@ -46,6 +47,7 @@ The contribution is only convincing if the following are shown:
 - Removing prototype-similarity gossip hurts performance.
 - Removing row-normalization hurts performance.
 - Replacing the disagreement residual with a one-hop neighbor target hurts performance.
+- Replacing the disagreement residual with direct consensus-state perturbation hurts performance.
 - Removing reliability gating hurts performance, especially early in training.
 - Fixed epsilon underperforms risk-aware epsilon.
 - The gain is larger on low-label splits, boundary pixels, and rare classes.

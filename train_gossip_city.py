@@ -125,6 +125,7 @@ def main():
         reliability_warmup=gossip_cfg.get("reliability_warmup", 256.0),
         epsilon_min_ratio=gossip_cfg.get("epsilon_min_ratio", 0.35),
         risk_gamma=gossip_cfg.get("risk_gamma", 1.0),
+        perturbation_mode=gossip_cfg.get("perturbation_mode", "residual"),
     ).cuda()
 
     train_loader_sup, train_loader_unsup, val_loader = get_loader(cfg, seed=seed)
