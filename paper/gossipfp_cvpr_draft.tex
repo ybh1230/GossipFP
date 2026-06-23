@@ -1,0 +1,223 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage{times}
+\usepackage{epsfig}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[pagebackref=true,breaklinks=true,colorlinks,bookmarks=false]{hyperref}
+
+\title{Gossip-Guided Feature Perturbation for Semi-Supervised Semantic Segmentation}
+
+\author{Anonymous CVPR Submission}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Semi-supervised semantic segmentation relies on unlabeled images to regularize dense classifiers, yet pseudo labels are often biased near semantic boundaries and underrepresented categories. Existing feature perturbation methods explore uncertain regions by estimating the feature density, but online density estimation introduces an auxiliary generative model and the resulting perturbation is not explicitly tied to the classes that are currently confused. This paper proposes Gossip-Guided Feature Perturbation (GossipFP), a class-level gossip framework for semi-supervised semantic segmentation. Instead of treating gossip as a full-parameter optimizer, GossipFP treats each semantic category as a node that maintains an online feature prototype. Each node exchanges information with its most relevant neighbors, selected by prototype similarity and teacher confusion. The gossiped neighbor state defines a semantic adversarial direction: unlabeled features are perturbed toward confusing categories and the student is trained to preserve the original pseudo label. A lightweight separation regularizer further encourages clean features to remain closer to their own prototype than to the gossiped neighbor. GossipFP removes the density estimator, produces class-conditional boundary perturbations, and provides a unified mechanism for memory update, neighbor exchange, perturbation, and regularization.
+\end{abstract}
+
+\section{Introduction}
+
+Semi-supervised semantic segmentation aims to learn dense visual representations from a small labeled set and a large unlabeled set. Teacher-student consistency methods have become a strong paradigm: the teacher predicts pseudo labels on weakly augmented images, and the student is trained on strongly augmented images. However, the quality of pseudo labels is uneven. High-confidence regions can be overrepresented, while boundary pixels, rare classes, and visually similar categories remain underexplored.
+
+Feature-level perturbation provides a direct way to regularize the classifier around its decision boundary. Density-descending feature perturbation (DDFP) estimates the feature density with a normalizing flow and perturbs confident features toward lower-density regions \cite{wang2024ddfp}. This is motivated by the low-density separation assumption, but it raises two practical issues. First, the density estimator is a second trainable model that must be optimized online with dense features. Second, a low-density direction is not necessarily the semantic direction that matters most for a particular pixel. For example, the useful perturbation for a road pixel is often toward sidewalk, car, or building boundaries, not an arbitrary sparse region in feature space.
+
+We ask whether gossip strategy can replace density estimation in a way that is necessary rather than cosmetic. Parameter-level gossip, as used in optimization literature, exchanges historical model parameters to escape local optima. Directly applying that idea to semantic segmentation is unattractive: it is expensive, hard to analyze at pixel level, and weakly related to pseudo-label bias. Our key observation is that gossip should operate at the semantic class level. Each class can be viewed as an information node. The node maintains what the teacher currently believes the class looks like, listens to nearby and confusing classes, and produces a boundary-aware direction for perturbing features.
+
+We propose GossipFP. A class prototype bank is updated online from labeled pixels and confident unlabeled pseudo labels. For each class, GossipFP selects gossip neighbors using both prototype similarity and the teacher's confusion distribution. The exchanged neighbor state acts as a semantic counterfactual: it indicates where the class boundary is likely to be weak. We then generate an adversarial feature perturbation that moves features toward this gossiped neighbor state. The perturbed features are supervised with the original pseudo labels, forcing the student classifier to remain stable under class-aware boundary exploration. Finally, a clean-feature gossip separation loss keeps features closer to their own class node than to the gossiped neighbor.
+
+Our contributions are:
+\begin{itemize}
+    \item We reformulate gossip strategy for semi-supervised segmentation as class-level semantic information exchange, avoiding costly full-parameter gossip.
+    \item We propose a gossip-guided feature perturbation that replaces density descent with class-conditional boundary exploration.
+    \item We introduce a unified online prototype memory, confusion-aware neighbor selection, adversarial gossip perturbation, and clean-feature separation loss.
+    \item We provide an implementation that removes the normalizing-flow density estimator and can be trained on PASCAL VOC and Cityscapes with standard distributed training.
+\end{itemize}
+
+\section{Related Work}
+
+\paragraph{Semi-supervised semantic segmentation.}
+Teacher-student training and consistency regularization are widely used for semi-supervised dense prediction. A teacher model produces pseudo labels, and a student model learns from strong perturbations while ignoring unreliable pixels. The main limitation is that pseudo labels can reinforce the teacher's current bias, especially around ambiguous boundaries.
+
+\paragraph{Feature perturbation.}
+Adversarial and feature-level perturbations regularize a classifier by probing local neighborhoods of the representation. DDFP perturbs features toward lower-density regions estimated by a normalizing flow \cite{wang2024ddfp}. GossipFP follows the same goal of decision-boundary exploration, but replaces density estimation with semantic information exchange among class prototypes.
+
+\paragraph{Gossip strategy.}
+Gossip protocols spread information through local exchanges without requiring a central coordinator \cite{kempe2003gossip}. In optimization, gossip can combine parameters from different nodes or histories. For dense prediction, we argue that parameter-level gossip is not the right granularity. GossipFP instead uses each class as a node and exchanges prototype-level semantic information.
+
+\section{Method}
+
+\subsection{Training Framework}
+
+Let $\mathcal{D}_l=\{(x_i,y_i)\}$ be labeled images and $\mathcal{D}_u=\{u_i\}$ be unlabeled images. We use a student network $S$ and an exponential moving average teacher $T$. The teacher predicts pseudo labels $\hat{y}$ on weakly augmented unlabeled images. Pixels with confidence below threshold $\gamma$ are ignored. The student is trained on labeled images, strongly augmented unlabeled images, and gossip-perturbed features.
+
+\subsection{Class-Level Gossip Memory}
+
+GossipFP maintains a prototype $p_c \in \mathbb{R}^d$ for every class $c$. Given teacher features $f_i$ and labels $\tilde{y}_i$ from labeled or confident pseudo-labeled pixels, the batch prototype for class $c$ is
+\begin{equation}
+    \bar{p}_c = \frac{1}{|\Omega_c|}\sum_{i \in \Omega_c} \frac{f_i}{\|f_i\|_2},
+    \quad
+    \Omega_c = \{i \mid \tilde{y}_i=c\}.
+\end{equation}
+The memory is updated with momentum:
+\begin{equation}
+    p_c \leftarrow
+    \mathrm{norm}\left(m p_c + (1-m)\bar{p}_c\right),
+\end{equation}
+where $m$ is the prototype momentum. Classes with too few pixels in the current distributed mini-batch are not updated.
+
+The teacher also provides a class confusion matrix. For pixels labeled as class $c$, we average the teacher probability assigned to class $j$:
+\begin{equation}
+    q_{c,j} = \frac{1}{|\Omega_c|}\sum_{i \in \Omega_c} P_T(j \mid x_i).
+\end{equation}
+The diagonal is set to zero, and the matrix is updated with momentum.
+
+\subsection{Gossip Neighbor Exchange}
+
+For every class node $c$, GossipFP scores candidate neighbors $j$ by combining prototype similarity and teacher confusion:
+\begin{equation}
+    s_{c,j} =
+    \cos(p_c,p_j) + \lambda_q q_{c,j},
+    \quad j \ne c.
+\end{equation}
+The top-$K$ classes form the gossip neighborhood $\mathcal{N}_c$. The exchanged neighbor state is
+\begin{equation}
+    g_c =
+    \mathrm{norm}\left(
+    \sum_{j \in \mathcal{N}_c}
+    \frac{\exp(s_{c,j}/\tau)}{\sum_{k \in \mathcal{N}_c}\exp(s_{c,k}/\tau)}
+    p_j
+    \right),
+\end{equation}
+where $\tau$ controls the sharpness of the gossip exchange.
+
+\subsection{Gossip-Guided Perturbation}
+
+For a feature map $F$ and pseudo label map $\hat{Y}$, the decoder first computes intermediate features $z$. To create a perturbation, we maximize the tendency of features to move toward their gossiped neighbor and away from their own class prototype:
+\begin{equation}
+    \mathcal{L}_{adv}
+    =
+    \frac{1}{|\Omega|}
+    \sum_{i \in \Omega}
+    \left[
+        \cos(z_i, g_{\hat{y}_i})
+        -
+        \cos(z_i, p_{\hat{y}_i})
+    \right].
+\end{equation}
+The perturbation is generated by one normalized gradient step:
+\begin{equation}
+    r = \epsilon
+    \frac{\nabla_r \mathcal{L}_{adv}(z(F+r), \hat{Y})}
+    {\|\nabla_r \mathcal{L}_{adv}(z(F+r), \hat{Y})\|_2}.
+\end{equation}
+The perturbed feature $F+r$ is then passed through the classifier and supervised by the original pseudo label. This is a semantic counterpart to density descent: instead of searching for a low-density direction, GossipFP searches for a currently confusing class boundary.
+
+\subsection{Gossip Separation Regularization}
+
+Clean features should remain closer to their own class node than to the gossiped neighbor. We use
+\begin{equation}
+    \mathcal{L}_{sep}
+    =
+    \frac{1}{|\Omega|}
+    \sum_{i \in \Omega}
+    \mathrm{softplus}\left(
+        \frac{\cos(z_i,g_{\tilde{y}_i})
+        -
+        \cos(z_i,p_{\tilde{y}_i}) + \delta}{\tau}
+    \right)\tau,
+\end{equation}
+where $\delta$ is a margin.
+
+\subsection{Overall Objective}
+
+The training objective is
+\begin{equation}
+    \mathcal{L}
+    =
+    \mathcal{L}_{sup}
+    + \lambda_u \mathcal{L}_{u}
+    + \lambda_p \mathcal{L}_{u}^{gossip}
+    + \lambda_g \mathcal{L}_{sep}.
+\end{equation}
+Here $\mathcal{L}_{u}$ is the standard pseudo-label loss on strongly augmented images and $\mathcal{L}_{u}^{gossip}$ is the pseudo-label loss on gossip-perturbed features.
+
+\begin{algorithm}[t]
+\caption{GossipFP Training}
+\begin{algorithmic}[1]
+\STATE Initialize student $S$, teacher $T$, and class gossip memory $\{p_c\}_{c=1}^C$.
+\FOR{each mini-batch}
+    \STATE Predict pseudo labels with teacher $T$.
+    \STATE Ignore low-confidence unlabeled pixels.
+    \STATE Update class prototypes and teacher confusion in the gossip memory.
+    \STATE Select top-$K$ gossip neighbors for each class.
+    \STATE Generate gossip-guided feature perturbation for unlabeled features.
+    \STATE Train $S$ with supervised, pseudo-label, perturbed pseudo-label, and separation losses.
+    \STATE Update $T$ with EMA of $S$.
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experiments}
+
+\subsection{Datasets and Protocols}
+
+We evaluate on PASCAL VOC 2012 and Cityscapes under standard semi-supervised splits. For PASCAL VOC, we use the 732 and 1464 labeled-image splits. For Cityscapes, we use the 372 labeled-image split. Mean Intersection-over-Union (mIoU) is reported on the validation set. All methods use the same DeepLabV3+ backbone and teacher-student training schedule unless otherwise specified.
+
+\subsection{Main Comparison}
+
+Table~\ref{tab:main} gives the expected reporting format. The final numbers should be filled after training on AutoDL.
+
+\begin{table}[t]
+\centering
+\caption{Main comparison on semi-supervised semantic segmentation.}
+\label{tab:main}
+\begin{tabular}{lccc}
+\toprule
+Method & VOC 732 & VOC 1464 & City 372 \\
+\midrule
+Teacher-student baseline & -- & -- & -- \\
+DDFP reproduced & -- & -- & -- \\
+GossipFP & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Study}
+
+\begin{table}[t]
+\centering
+\caption{Recommended ablations for validating the gossip design.}
+\label{tab:ablation}
+\begin{tabular}{lc}
+\toprule
+Variant & mIoU \\
+\midrule
+No gossip perturbation & -- \\
+Prototype similarity only & -- \\
+Teacher confusion only & -- \\
+Prototype + confusion gossip & -- \\
+Prototype + confusion + separation & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The decisive ablation is whether prototype-plus-confusion gossip outperforms either source alone. This would show that the method is not merely a memory-bank regularizer, but an information-exchange mechanism that discovers semantically relevant boundary directions.
+
+\subsection{Efficiency}
+
+GossipFP removes the normalizing-flow model and its optimizer. The remaining memory update consists of class-wise feature accumulation and a small $C \times C$ relation matrix. Since $C=21$ for PASCAL VOC and $C=19$ for Cityscapes, the overhead is negligible compared with the backbone forward pass.
+
+\section{Conclusion}
+
+This paper proposed GossipFP, a class-level gossip strategy for semi-supervised semantic segmentation. By replacing density descent with prototype and confusion based information exchange, GossipFP produces semantic boundary perturbations without an auxiliary density estimator. The method provides a unified view of memory update, neighbor exchange, perturbation generation, and feature separation, and offers a more direct solution to pseudo-label boundary bias than class-agnostic density exploration.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

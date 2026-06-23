@@ -1,0 +1,9 @@
+numpy
+Pillow
+PyYAML
+scipy
+scikit-image
+setuptools
+tensorboardX
+torch
+torchvision

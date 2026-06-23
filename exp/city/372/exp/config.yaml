@@ -1,0 +1,91 @@
+dataset:
+  type: cityscapes
+  train:
+    data_root: /workspace/data/Cityscapes
+    data_list: ../../../../data/splits/cityscapes/372/labeled.txt
+    flip: True
+    GaussianBlur: False
+    rand_resize: [0.5, 2.0]
+  num_cls: 19
+
+  val:
+    data_root: /workspace/data/Cityscapes
+    data_list: ../../../../data/splits/cityscapes/val.txt
+
+  train_crop_size: 800
+  batch_size: 2
+  n_sup: 372
+  noise_std: 0.1
+  workers: 4
+  mean: [123.675, 116.28, 103.53]
+  std: [58.395, 57.12, 57.375]
+  ignore_label: 255
+ignore_label: 255
+
+trainer:
+  epochs: 240
+  eval_on: True
+  optimizer:
+    type: SGD
+    kwargs:
+      lr: 0.005
+      momentum: 0.9
+      weight_decay: 0.0001
+  lr_scheduler:
+    mode: poly
+    kwargs:
+      power: 0.9
+  unsupervised:
+    TTA: False
+    drop_percent: 80
+    apply_aug: cutmix
+  sup_only_epoch: 1
+  gossip_start_epoch: 1
+  thresh: 0.95
+
+saver:
+  snapshot_dir: checkpoints
+  pretrain: ''
+  auto_resume: False
+
+criterion:
+  type: CELoss
+  kwargs:
+    use_weight: False
+
+net:
+  fts_dim: 256
+  num_classes: 19
+  sync_bn: True
+  ema_decay: 0.999
+  encoder:
+    type: model.model.resnet.resnet101
+    kwargs:
+      multi_grid: False
+      zero_init_residual: False
+      fpn: True
+      replace_stride_with_dilation: [False, False, True]
+  decoder:
+    type: model.model.decoder.dec_deeplabv3_plus
+    kwargs:
+      inner_planes: 256
+      dilations: [6, 12, 18]
+
+gossip:
+  momentum: 0.99
+  confusion_momentum: 0.95
+  topk: 3
+  temperature: 0.2
+  confusion_weight: 0.5
+  min_pixels: 16
+  margin: 0.2
+  loss_weight: 0.05
+
+adv:
+  eps: 4.0
+  eps_rand_init: False
+  zero_init: True
+  tiny_rand_init: False
+  l2_norm: True
+  l_infi_norm: False
+  rand_noise: False

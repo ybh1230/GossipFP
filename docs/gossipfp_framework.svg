@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="420" viewBox="0 0 980 420">
+  <style>
+    .box { fill: #f7f8fb; stroke: #1f2937; stroke-width: 2; rx: 10; }
+    .gossip { fill: #eef7f1; stroke: #087443; stroke-width: 2; rx: 10; }
+    .warn { fill: #fff5e8; stroke: #b45309; stroke-width: 2; rx: 10; }
+    .text { font-family: Arial, sans-serif; font-size: 18px; fill: #111827; }
+    .small { font-family: Arial, sans-serif; font-size: 14px; fill: #374151; }
+    .arrow { stroke: #111827; stroke-width: 2.5; marker-end: url(#arrow); fill: none; }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#111827" />
+    </marker>
+  </defs>
+
+  <rect x="30" y="55" width="165" height="80" class="box" />
+  <text x="112" y="88" text-anchor="middle" class="text">Labeled +</text>
+  <text x="112" y="112" text-anchor="middle" class="text">Unlabeled</text>
+
+  <rect x="255" y="40" width="170" height="110" class="box" />
+  <text x="340" y="78" text-anchor="middle" class="text">EMA Teacher</text>
+  <text x="340" y="106" text-anchor="middle" class="small">features, logits,</text>
+  <text x="340" y="126" text-anchor="middle" class="small">pseudo labels</text>
+
+  <rect x="495" y="30" width="205" height="130" class="gossip" />
+  <text x="598" y="65" text-anchor="middle" class="text">Gossip Memory</text>
+  <text x="598" y="93" text-anchor="middle" class="small">class prototypes</text>
+  <text x="598" y="113" text-anchor="middle" class="small">teacher confusion</text>
+  <text x="598" y="133" text-anchor="middle" class="small">top-K neighbors</text>
+
+  <rect x="770" y="55" width="170" height="80" class="warn" />
+  <text x="855" y="88" text-anchor="middle" class="text">Gossip</text>
+  <text x="855" y="112" text-anchor="middle" class="text">Perturbation</text>
+
+  <rect x="255" y="250" width="170" height="95" class="box" />
+  <text x="340" y="285" text-anchor="middle" class="text">Student</text>
+  <text x="340" y="313" text-anchor="middle" class="small">clean + strong aug</text>
+  <text x="340" y="333" text-anchor="middle" class="small">+ perturbed features</text>
+
+  <rect x="520" y="250" width="160" height="95" class="box" />
+  <text x="600" y="285" text-anchor="middle" class="text">Losses</text>
+  <text x="600" y="313" text-anchor="middle" class="small">supervised, pseudo</text>
+  <text x="600" y="333" text-anchor="middle" class="small">gossip separation</text>
+
+  <path d="M195 95 H255" class="arrow" />
+  <path d="M425 95 H495" class="arrow" />
+  <path d="M700 95 H770" class="arrow" />
+  <path d="M855 135 V215 C855 240 760 250 680 275" class="arrow" />
+  <path d="M195 95 C225 175 225 260 255 295" class="arrow" />
+  <path d="M425 295 H520" class="arrow" />
+  <path d="M600 250 C565 205 585 175 598 160" class="arrow" />
+  <path d="M600 345 C500 395 385 385 340 345" class="arrow" />
+</svg>
