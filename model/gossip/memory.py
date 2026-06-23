@@ -132,7 +132,7 @@ class GossipPrototypeBank(nn.Module):
         self.reliability.copy_(torch.clamp(self.confidence * coverage, 0.0, 1.0))
 
         if logits is not None:
-            self._update_confusion(logits.detach().float(), labels, counts)
+            self._update_confusion(logits.detach().float(), labels, label_confidence)
 
         self._refresh_graph_cache()
 
@@ -158,7 +158,8 @@ class GossipPrototypeBank(nn.Module):
         if self.perturbation_mode == "consensus":
             loss = (feat * peer).sum(1)
         else:
-            loss = (feat * peer).sum(1) - (feat * own).sum(1)
+            residual_direction = F.normalize(peer - own, dim=1, eps=1e-6)
+            loss = (feat * residual_direction).sum(1)
         return (loss * risk).sum() / risk.sum().clamp_min(1e-6)
 
     def separation_loss(self, features, labels, ignore_mask=None):
@@ -193,25 +194,29 @@ class GossipPrototypeBank(nn.Module):
         return scale.view(labels.shape[0], 1, labels.shape[1], labels.shape[2])
 
     @torch.no_grad()
-    def _update_confusion(self, logits, labels, counts):
+    def _update_confusion(self, logits, labels, label_confidence):
         if logits.shape[-2:] != labels.shape[-2:]:
             logits = F.interpolate(logits, size=labels.shape[-2:], mode="bilinear", align_corners=True)
         probs = F.softmax(logits, dim=1)
         flat_probs = probs.permute(0, 2, 3, 1).reshape(-1, probs.shape[1])
         flat_labels = labels.reshape(-1)
+        flat_confidence = label_confidence.reshape(-1).to(flat_probs.dtype)
         valid = self._valid_label_mask(flat_labels)
 
         confusion_sum = logits.new_zeros(self.num_classes, self.num_classes)
+        confidence_sum = logits.new_zeros(self.num_classes)
         if valid.any():
-            confusion_sum.index_add_(0, flat_labels[valid], flat_probs[valid])
+            weighted_probs = flat_probs[valid] * flat_confidence[valid].unsqueeze(1)
+            confusion_sum.index_add_(0, flat_labels[valid], weighted_probs)
+            confidence_sum.index_add_(0, flat_labels[valid], flat_confidence[valid])
 
         self._all_reduce_(confusion_sum)
-        row_counts = counts.clamp_min(1.0).unsqueeze(1)
-        batch_confusion = confusion_sum / row_counts
+        self._all_reduce_(confidence_sum)
+        batch_confusion = confusion_sum / confidence_sum.clamp_min(1.0).unsqueeze(1)
         diag = torch.arange(self.num_classes, device=batch_confusion.device)
         batch_confusion[diag, diag] = 0.0
 
-        active = counts >= self.min_pixels
+        active = confidence_sum >= self.min_pixels
         if active.any():
             self.confusion[active] = (
                 self.confusion_momentum * self.confusion[active]

@@ -77,24 +77,32 @@ To reduce the cold-start problem, each class node also maintains a reliability v
 \begin{equation}
     \rho_c = \kappa_c \left(1-\exp(-n_c/\eta)\right),
 \end{equation}
-where $\eta$ controls the warm-up speed. A class participates in gossip only when $\rho_c$ exceeds a threshold. This prevents early teacher mistakes from immediately driving semantic perturbations.
+where $\eta$ controls the warm-up speed. The product form approximates two requirements for a reliable class node: the assigned labels should be correct, captured by $\kappa_c$, and the node should have enough observations, captured by the coverage term $1-\exp(-n_c/\eta)$. The latter can be viewed as a Poisson-style probability that sufficient evidence has been observed. A class participates in gossip only when $\rho_c$ exceeds a threshold. This prevents early teacher mistakes from immediately driving semantic perturbations.
 
-The teacher also provides a class confusion matrix. For pixels labeled as class $c$, we average the teacher probability assigned to class $j$:
+The teacher also provides a class confusion matrix. For pixels labeled as class $c$, we average the teacher probability assigned to class $j$ with label confidence $a_i$ as weight:
 \begin{equation}
-    q_{c,j} = \frac{1}{|\Omega_c|}\sum_{i \in \Omega_c} P_T(j \mid x_i).
+    q_{c,j} = \frac{\sum_{i \in \Omega_c} a_i P_T(j \mid x_i)}
+    {\sum_{i \in \Omega_c} a_i}.
 \end{equation}
-The diagonal is set to zero, and the matrix is updated with momentum.
+For ground-truth pixels $a_i=1$; for pseudo-labeled pixels $a_i$ is the teacher confidence. The diagonal is set to zero, and the matrix is updated with momentum.
 
 \subsection{Normalized Gossip Relation Graph}
 
-Directly adding prototype similarity and teacher confusion is ill-conditioned because they have different scales. GossipFP first row-normalizes both relation matrices over valid neighbors. Denote this masked row standardization by $\mathcal{Z}(\cdot)$. For reliable class nodes, the edge score is
+Directly adding prototype similarity and teacher confusion is ill-conditioned because they have different scales. Let $\mathcal{V}=\{c\mid \rho_c\ge\rho_{\min}\}$ be the reliable node set. Valid neighbors for class $c$ are $\mathcal{V}\setminus\{c\}$, and invalid entries are masked. GossipFP first row-normalizes both relation matrices over valid neighbors:
+\begin{equation}
+    \mathcal{Z}(M)_{c,j} =
+    \frac{M_{c,j}-\mu_c(M)}
+    {\sqrt{\sigma_c^2(M)+\epsilon_z}},
+    \quad j\in\mathcal{V}\setminus\{c\},
+\end{equation}
+where $\mu_c$ and $\sigma_c^2$ are the masked row mean and variance. For reliable class nodes, the edge score is
 \begin{equation}
     s_{c,j} =
     \lambda_s \mathcal{Z}\left(\cos(p_c,p_j)\right)
     + \lambda_q \mathcal{Z}\left(q_{c,j}\right),
     \quad j \ne c.
 \end{equation}
-The top-$K$ classes form the outgoing neighborhood $\mathcal{N}_c$. The row-stochastic adjacency is
+The top-$K$ classes form the outgoing neighborhood $\mathcal{N}_c$. Top-$K$ sparsification avoids noisy all-class averaging and keeps diffusion local; we evaluate sensitivity to $K$ in the ablation study. The row-stochastic adjacency is
 \begin{equation}
     A_{c,j} =
     \frac{\exp(s_{c,j}/\tau)}{\sum_{k \in \mathcal{N}_c}\exp(s_{c,k}/\tau)}
@@ -117,6 +125,8 @@ Class information is exchanged through multi-round lazy diffusion rather than a 
 \end{equation}
 where $\alpha$ is the self-loop coefficient. The diffused consensus state is $h_c=h_c^{(R)}$. This gives gossip its standard consensus interpretation: each reliable class node repeatedly averages information from local graph neighbors while retaining part of its own state.
 
+For a fixed graph and ignoring the final $\ell_2$ normalization for clarity, the update is $H^{(r+1)}=PH^{(r)}$ with $P=\alpha I+(1-\alpha)A$. Since $A$ is row-stochastic and $\alpha\in(0,1)$, $P$ is also row-stochastic and lazy; repeated application converges to a local consensus component under the usual connectedness assumptions. GossipFP does not use the limiting consensus. A large $R$ would oversmooth class states and erase boundary information. We therefore use a small $R$ and interpret $P^R-I$ as a graph high-pass operator on class prototypes.
+
 The perturbation field is not the consensus state itself. We use the graph-disagreement residual
 \begin{equation}
     b_c = h_c - p_c,
@@ -131,16 +141,17 @@ Since $p_c$ and $h_c$ are normalized, $\|b_c\|_2/2 \in [0,1]$. The risk score co
 
 For a feature map $F$ and pseudo label map $\hat{Y}$, the decoder first computes intermediate features $z$. To create a perturbation, we maximize the tendency of features to move along the class disagreement residual:
 \begin{equation}
+    \bar{b}_c = \frac{b_c}{\|b_c\|_2+\epsilon_b},
+    \quad
     \mathcal{L}_{adv}
     =
     \frac{1}{\sum_{i\in\Omega}\omega_{\hat{y}_i}}
     \sum_{i \in \Omega}
     \omega_{\hat{y}_i}
-    \left[
-        \cos(z_i, g_{\hat{y}_i})
-        -
-        \cos(z_i, p_{\hat{y}_i})
-    \right].
+    \left\langle
+        \frac{z_i}{\|z_i\|_2+\epsilon_z},
+        \bar{b}_{\hat{y}_i}
+    \right\rangle.
 \end{equation}
 The perturbation is generated by one normalized gradient step with adaptive radius:
 \begin{equation}
@@ -150,7 +161,7 @@ The perturbation is generated by one normalized gradient step with adaptive radi
     \quad
     \epsilon_i=\epsilon_{\min}+(\epsilon-\epsilon_{\min})\omega_{\hat{y}_i}^{\beta}.
 \end{equation}
-where $g_c=h_c$ in implementation, making the gradient direction proportional to the residual $h_c-p_c$. The perturbed feature $F+r$ is then passed through the classifier and supervised by the original pseudo label. This is a semantic counterpart to density descent: instead of searching for a class-agnostic low-density direction, GossipFP searches for a reliable, currently confusing class boundary. The adaptive radius avoids large perturbations for low-reliability or low-risk classes.
+This formulation directly uses the normalized residual direction. Due to feature normalization, the gradient with respect to the pre-normalized feature is the tangent-space projection of $\bar{b}_{\hat{y}_i}$, rather than an unqualified algebraic equality to $h_c-p_c$. The consensus-state ablation replaces $\bar{b}_c$ with the normalized consensus state $h_c$. The perturbed feature $F+r$ is then passed through the classifier and supervised by the original pseudo label. This is a semantic counterpart to density descent: instead of searching for a class-agnostic low-density direction, GossipFP searches for a reliable, currently confusing class boundary. The adaptive radius avoids large perturbations for low-reliability or low-risk classes.
 
 \subsection{Gossip Separation Regularization}
 
@@ -239,6 +250,9 @@ Prototype similarity only & -- \\
 Teacher confusion only & -- \\
 Unnormalized score addition & -- \\
 One-hop exchange, no diffusion & -- \\
+$R=3$ diffusion rounds & -- \\
+$K=1$ neighbors & -- \\
+$K=5$ neighbors & -- \\
 No reliability gate & -- \\
 Fixed perturbation radius & -- \\
 Consensus-state perturbation & -- \\
@@ -266,7 +280,7 @@ To make the residual field interpretable, we visualize the class-wise norm $\|b_
 
 \subsection{Efficiency}
 
-GossipFP removes the normalizing-flow model and its optimizer. The remaining memory update consists of class-wise feature accumulation and a small $C \times C$ relation matrix. Since $C=21$ for PASCAL VOC and $C=19$ for Cityscapes, the overhead is negligible compared with the backbone forward pass.
+GossipFP removes the normalizing-flow model and its optimizer. The remaining memory update consists of class-wise feature accumulation, relation construction, and sparse gossip diffusion. Dense relation construction costs $O(C^2d)$ for $C$ classes and prototype dimension $d$, while top-$K$ diffusion costs $O(RCKd)$ for $R$ rounds. Since $C=21$ for PASCAL VOC and $C=19$ for Cityscapes, the overhead is negligible compared with the backbone forward pass. For datasets with hundreds of classes, dense relation construction may become noticeable; in that regime the same formulation can use approximate top-$K$ retrieval or update the relation graph less frequently. Thus the method is intended as a class-level memory mechanism whose cost scales with the number of semantic categories, not with the number of pixels.
 
 \section{Conclusion}
 

@@ -122,6 +122,15 @@ bash train.sh 4 29501
 
 Both configs share the same data split and training schedule; the intended comparison is only `gossip.perturbation_mode: residual` vs. `consensus`.
 
+One-round diffusion ablation is also ready:
+
+```bash
+cd exp/pascal/732/ablation_one_round
+bash train.sh 4 29502
+```
+
+For top-K sensitivity, copy an experiment config and change `gossip.topk` to `1` or `5`.
+
 ## Residual Visualization
 
 After training, generate a class-wise residual heatmap:

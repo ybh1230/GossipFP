@@ -32,6 +32,10 @@ GossipFP targets semantic boundary exploration under noisy pseudo labels. For a 
 
 - **"Gossip is only packaging."** The method now includes an explicit row-stochastic class graph and repeated lazy diffusion; the perturbation is defined by the graph-disagreement residual rather than by a nearest-negative prototype.
 - **"Graph diffusion is common."** The key ablation is residual-disagreement perturbation vs. consensus-state perturbation under the same graph. The method claims the residual is useful, not that diffusion alone is novel.
+- **"The residual direction is not the gradient of two cosine terms."** The implementation now directly optimizes the inner product between normalized features and the normalized residual vector. The paper no longer claims an algebraic equivalence between a cosine-difference gradient and the prototype residual.
+- **"Reliability is heuristic."** The reliability score is motivated as confidence multiplied by support coverage; the latter follows a Poisson-style observation coverage term. The paper also positions reliability gating as an ablation rather than a theorem.
+- **"Graph construction is under-specified."** Valid neighbors are reliable non-self class nodes; relation rows are explicitly standardized over this masked set; teacher confusion is confidence-weighted so ground-truth and pseudo-labels do not contribute equally by default.
+- **"No convergence/scalability discussion."** The method now describes lazy diffusion as $P=\alpha I+(1-\alpha)A$, explains that small $R$ preserves high-frequency disagreement, and reports graph cost as $O(C^2d+RCKd)$.
 - **"Similarity and confusion cannot be directly added."** Both matrices are masked and row-standardized before fusion.
 - **"Teacher confusion is unreliable early."** Each class node has reliability from confidence and effective sample count; unreliable nodes are gated.
 - **"Fixed epsilon is unsafe."** Perturbation radius is scaled by class risk.
